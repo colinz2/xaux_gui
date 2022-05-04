@@ -7,7 +7,13 @@ import (
 	"github.com/realzhangm/xaux/pkg/sound_cap"
 	"github.com/realzhangm/xaux/pkg/x"
 	"github.com/sqweek/dialog"
+	"path"
+	"sync/atomic"
 	"time"
+)
+
+var (
+	audioFileID int64 = 1
 )
 
 type AsrRTSoundCapWin interface {
@@ -18,6 +24,7 @@ type AsrRTSoundCap struct {
 	devName        string
 	soundCap       *sound_cap.SoundCap
 	cb             sound_cap.AsrResultCallBack
+	resultList     []string
 	resultIndex    int
 	writeListIndex int
 	isMicroPhone   bool
@@ -38,6 +45,7 @@ func (a *AsrRTSoundCap) Run() error {
 
 func (a *AsrRTSoundCap) Stop() {
 	a.soundCap.Close()
+	a.soundCap.DumpRecordAudio()
 }
 
 func MakeAsrTRSoundCap(ctx context.Context,
@@ -64,18 +72,30 @@ func MakeAsrTRSoundCap(ctx context.Context,
 	return &arc
 }
 
+func audioFilePath(dir string, isMicroPhone bool) string {
+	// yyyy-mm-dd-hh-MM-ss_ID_microphone.wav
+	timeStr := time.Now().Format("20060102-150405")
+	fType := "speaker"
+	if isMicroPhone {
+		fType = "microphone"
+	}
+	fileExt := "wav"
+	fileName := fmt.Sprintf("%s_%06d_%s.%s", timeStr, atomic.LoadInt64(&audioFileID), fType, fileExt)
+	atomic.AddInt64(&audioFileID, 1)
+	return path.Join(dir, fileName)
+}
+
 func MakeAsrRTSoundCapListBySetting(setting *Setting) []*AsrRTSoundCap {
 	var list []*AsrRTSoundCap
 	if setting.isMicroPhoneSelected {
 		m := MakeAsrTRSoundCap(context.TODO(), setting.proxyAddr, setting.microPhoneName,
-			"", true, setting.ffDevs)
+			audioFilePath(setting.audioSavaDir, true), true, setting.ffDevs)
 		list = append(list, m)
-
 	}
 
 	if setting.isSpeakerSelected {
 		s := MakeAsrTRSoundCap(context.TODO(), setting.proxyAddr, setting.speakerName,
-			"", false, setting.ffDevs)
+			audioFilePath(setting.audioSavaDir, false), false, setting.ffDevs)
 
 		list = append(list, s)
 	}
@@ -110,7 +130,9 @@ func runRealTimeTrans() {
 		go func() {
 			scList[i].Run()
 		}()
-		time.Sleep(time.Second * 3)
+		if err := <-scList[i].soundCap.StartDone(); err != nil {
+			panic(fmt.Sprintf("start %s error:%s", scList[i].devName, err.Error()))
+		}
 	}
 
 	srtWin.Start(func() {

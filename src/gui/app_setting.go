@@ -6,6 +6,8 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/realzhangm/xaux/pkg/ffaudio"
+	"os"
+	"path"
 	"xaux_gui/src/mytheme"
 )
 
@@ -22,6 +24,7 @@ type Setting struct {
 	isMicroPhoneSelected bool
 	ffDevs               *ffaudio.DevPlaybackAndCapture
 	proxyAddr            string
+	audioSavaDir         string
 }
 
 type appSetting struct {
@@ -38,12 +41,18 @@ func MakeAppSetting() *appSetting {
 			isMicroPhoneSelected: true,
 			isSpeakerSelected:    true,
 			proxyAddr:            "127.0.0.1:11024",
+			audioSavaDir:         "",
 		},
 	}
 }
 
 // LazyInit : UI layout
 func (a *appSetting) LazyInit() error {
+	if len(a.audioSavaDir) == 0 {
+		dir := fyne.CurrentApp().Storage().RootURI().Path()
+		a.audioSavaDir = path.Join(dir, "audio")
+		os.Mkdir(a.audioSavaDir, os.ModePerm)
+	}
 	a.tabItem = container.NewTabItemWithIcon(AppSettingName, mytheme.ResSettings, nil)
 
 	ffDevs, err := ffaudio.GetDevPlaybackAndCapture()

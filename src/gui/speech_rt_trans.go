@@ -7,6 +7,7 @@ import (
 	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/widget"
 	"github.com/realzhangm/xaux/pkg/x"
+	"github.com/sqweek/dialog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,7 +31,7 @@ type SpeechRTTrans struct {
 	list      *widget.List
 	window    fyne.Window
 	listIndex int
-	listItems []*ListItem
+	listItems []*ListItem // to show in UI
 	mu        sync.Mutex
 	running   int32
 }
@@ -127,12 +128,14 @@ func (s *SpeechRTTrans) Start(onClosed func()) {
 		})
 	s.window.SetContent(container.NewBorder(nil, nil, nil, nil, s.list))
 	s.window.Show()
-	s.window.SetOnClosed(func() {
-		fmt.Println("quit ......")
-		if onClosed != nil {
-			onClosed()
+	s.window.SetCloseIntercept(func() {
+		if dialog.Message("退出识别吗？").Title("确认窗").YesNo() {
+			if onClosed != nil {
+				onClosed()
+			}
+			atomic.StoreInt32(&s.running, 0)
+			s.window.Close()
 		}
-		atomic.StoreInt32(&s.running, 0)
 	})
 	atomic.StoreInt32(&s.running, 1)
 }
