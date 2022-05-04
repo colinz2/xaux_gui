@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	fyne.io/fyne/v2 v2.1.4
-	github.com/realzhangm/xaux v0.0.0-20220503152034-eed73db31829
+	github.com/realzhangm/xaux v0.0.0-20220504081105-8291e3a70fed
 	github.com/sqweek/dialog v0.0.0-20220227145630-7a1c9e333fcf
 )
 

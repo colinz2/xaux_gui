@@ -36,8 +36,8 @@ github.com/pkg/errors v0.8.0/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINE
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/realzhangm/xaux v0.0.0-20220503152034-eed73db31829 h1:clxUfmu5itFQJMlrxmItlOllPGKHWjF4wcR8XeQAumA=
-github.com/realzhangm/xaux v0.0.0-20220503152034-eed73db31829/go.mod h1:Ee9+H8uxzlzLwW+Jvxq+vRGNG7z7kCMoFh3QBbBjKUc=
+github.com/realzhangm/xaux v0.0.0-20220504081105-8291e3a70fed h1:9LFlAtp7Oyy/+sew03V1ikGWlC8yHRbDsNNkLvIT9Jw=
+github.com/realzhangm/xaux v0.0.0-20220504081105-8291e3a70fed/go.mod h1:Ee9+H8uxzlzLwW+Jvxq+vRGNG7z7kCMoFh3QBbBjKUc=
 github.com/russross/blackfriday/v2 v2.0.1/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
 github.com/shurcooL/sanitized_anchor_name v1.0.0/go.mod h1:1NzhyTcUVG4SuEtjjoZeVRXNmyL/1OwPU0+IJeTBvfc=
 github.com/spf13/afero v1.1.2/go.mod h1:j4pytiNVoe2o6bmDsKpLACNPDBIoEAkihy7loJ1B0CQ=

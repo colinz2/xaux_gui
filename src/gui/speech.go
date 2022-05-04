@@ -3,13 +3,13 @@ package gui
 import (
 	"context"
 	"fmt"
-	"github.com/realzhangm/xaux/pkg/ffaudio"
-	"github.com/realzhangm/xaux/pkg/sound_cap"
 	"github.com/realzhangm/xaux/pkg/x"
 	"github.com/sqweek/dialog"
 	"path"
 	"sync/atomic"
 	"time"
+	"xaux_gui/pkg/ffaudio"
+	"xaux_gui/pkg/sound_cap"
 )
 
 var (

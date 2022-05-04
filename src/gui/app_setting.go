@@ -5,9 +5,9 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
-	"github.com/realzhangm/xaux/pkg/ffaudio"
 	"os"
 	"path"
+	"xaux_gui/pkg/ffaudio"
 	"xaux_gui/src/mytheme"
 )
 

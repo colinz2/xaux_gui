@@ -5,8 +5,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
-	"github.com/realzhangm/xaux/pkg/ffaudio"
-	"os"
+	"xaux_gui/pkg/ffaudio"
 	"xaux_gui/src/mytheme"
 )
 
@@ -24,11 +23,6 @@ type MainWin struct {
 	win fyne.Window
 	ac  *appContainer
 	mm  *MainMenu
-}
-
-func init() {
-	os.Setenv("FYNE_SCALE", "1.0")
-	os.Setenv("FYNE_FONT", "./asset/apr.ttf")
 }
 
 func appQuit() {
