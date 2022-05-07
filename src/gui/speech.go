@@ -23,7 +23,6 @@ type AsrRTSoundCapWin interface {
 type AsrRTSoundCap struct {
 	devName        string
 	soundCap       *sound_cap.SoundCap
-	cb             sound_cap.AsrResultCallBack
 	resultList     []string
 	resultIndex    int
 	writeListIndex int
@@ -138,6 +137,14 @@ func runRealTimeTrans() {
 	srtWin.Start(func() {
 		for i := range scList {
 			scList[i].Stop()
+		}
+	}, func() {
+		for i := range scList {
+			scList[i].soundCap.Pause()
+		}
+	}, func() {
+		for i := range scList {
+			scList[i].soundCap.Resume()
 		}
 	})
 }

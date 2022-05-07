@@ -11,8 +11,6 @@ import (
 	"sync/atomic"
 )
 
-type AsrResultCallBack func(rsp *x.AllResponse) error
-
 type SoundCap struct {
 	asrClient     *x.Client
 	cmd           *exec.Cmd
@@ -32,7 +30,7 @@ type Config struct {
 	RecordFilePath string
 }
 
-func NewSoundCap(ctx context.Context, config *Config, asrCb AsrResultCallBack) (*SoundCap, error) {
+func NewSoundCap(ctx context.Context, config *Config, asrCb x.AsrResultCallBack) (*SoundCap, error) {
 	if len(config.ProxyAddr) == 0 {
 		panic("len of config ProxyAddr == 0")
 	}
@@ -52,15 +50,13 @@ func NewSoundCap(ctx context.Context, config *Config, asrCb AsrResultCallBack) (
 	}
 
 	var err error = nil
-	sc.asrClient, err = x.NewClient(sc.ProxyAddr)
-	if err != nil {
+	if sc.asrClient, err = x.NewClient(sc.ProxyAddr, asrCb); err != nil {
 		return nil, err
 	}
-	err = sc.asrClient.Start(x.StartConfig{
+	if err = sc.asrClient.Start(x.StartConfig{
 		SampleRate:    int32(sc.sampleRate),
-		BitsPerSample: int32(sc.bitsPerSample),
-	}, asrCb)
-	if err != nil {
+		BitsPerSample: int32(sc.bitsPerSample)},
+	); err != nil {
 		return nil, err
 	}
 
@@ -98,8 +94,8 @@ func (s *SoundCap) Read(p []byte) (n int, err error) {
 }
 
 func (s *SoundCap) Write(p []byte) (n int, err error) {
-	if s.IsClose() {
-		return 0, nil
+	if s.isClose() {
+		return len(p), nil
 	}
 
 	dataLen := len(p)
@@ -123,7 +119,7 @@ func (s *SoundCap) Write(p []byte) (n int, err error) {
 			panic(err)
 		}
 		err = s.asrClient.Send(p)
-		if err != nil {
+		if err != nil && err == x.ErrNoLooping {
 			panic(err)
 		}
 	}
@@ -155,11 +151,30 @@ func (s *SoundCap) close() {
 		fmt.Println("quit ffmedi")
 	}
 	if s.asrClient != nil {
+		s.asrClient.End()
 		s.asrClient.Close()
 	}
 }
 
-func (s *SoundCap) IsClose() bool {
+func (s *SoundCap) Resume() error {
+	if err := s.asrClient.Start(x.StartConfig{
+		SampleRate:    int32(s.sampleRate),
+		BitsPerSample: int32(s.bitsPerSample)},
+	); err != nil {
+		panic(err)
+		return err
+	}
+	return nil
+}
+
+func (s *SoundCap) Pause() {
+	err := s.asrClient.End()
+	if err != nil {
+		panic(err)
+	}
+}
+
+func (s *SoundCap) isClose() bool {
 	return atomic.LoadInt32(&s.isClosed) == 1
 }
 

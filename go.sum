@@ -38,6 +38,8 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/realzhangm/xaux v0.0.0-20220504081105-8291e3a70fed h1:9LFlAtp7Oyy/+sew03V1ikGWlC8yHRbDsNNkLvIT9Jw=
 github.com/realzhangm/xaux v0.0.0-20220504081105-8291e3a70fed/go.mod h1:Ee9+H8uxzlzLwW+Jvxq+vRGNG7z7kCMoFh3QBbBjKUc=
+github.com/realzhangm/xaux v0.0.0-20220507140449-c602a8a43e6e h1:QpT8Rh95lFLiPDhsVKSM/fUiEEpmxBSXugIHIM0RPWo=
+github.com/realzhangm/xaux v0.0.0-20220507140449-c602a8a43e6e/go.mod h1:Ee9+H8uxzlzLwW+Jvxq+vRGNG7z7kCMoFh3QBbBjKUc=
 github.com/russross/blackfriday/v2 v2.0.1/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
 github.com/shurcooL/sanitized_anchor_name v1.0.0/go.mod h1:1NzhyTcUVG4SuEtjjoZeVRXNmyL/1OwPU0+IJeTBvfc=
 github.com/spf13/afero v1.1.2/go.mod h1:j4pytiNVoe2o6bmDsKpLACNPDBIoEAkihy7loJ1B0CQ=

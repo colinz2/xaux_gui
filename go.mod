@@ -4,8 +4,9 @@ go 1.18
 
 require (
 	fyne.io/fyne/v2 v2.1.4
-	github.com/realzhangm/xaux v0.0.0-20220504081105-8291e3a70fed
+	github.com/realzhangm/xaux v0.0.0-20220507140449-c602a8a43e6e
 	github.com/sqweek/dialog v0.0.0-20220227145630-7a1c9e333fcf
+	golang.org/x/sys v0.0.0-20220502124256-b6088ccd6cba
 )
 
 require (
@@ -25,7 +26,6 @@ require (
 	golang.org/x/image v0.0.0-20200430140353-33d19683fad8 // indirect
 	golang.org/x/net v0.0.0-20210405180319-a5a99cb37ef4 // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c // indirect
-	golang.org/x/sys v0.0.0-20220502124256-b6088ccd6cba // indirect
 	golang.org/x/text v0.3.3 // indirect
 	gopkg.in/yaml.v2 v2.2.8 // indirect
 )

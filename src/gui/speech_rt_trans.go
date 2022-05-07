@@ -5,6 +5,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/data/binding"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/realzhangm/xaux/pkg/x"
 	"github.com/sqweek/dialog"
@@ -34,6 +35,7 @@ type SpeechRTTrans struct {
 	listItems []*ListItem // to show in UI
 	mu        sync.Mutex
 	running   int32
+	pauseFlag int ///button
 }
 
 func NewSpeechRTTrans() *SpeechRTTrans {
@@ -55,6 +57,9 @@ func (s *SpeechRTTrans) AsrUpdateUI(arc *AsrRTSoundCap, rsp *x.AllResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if atomic.LoadInt32(&s.running) == 0 {
+		return
+	}
+	if rsp.Type != x.TypeRecognizing && rsp.Type != x.TypeSentenceEnd {
 		return
 	}
 
@@ -81,7 +86,7 @@ func (s *SpeechRTTrans) AsrUpdateUI(arc *AsrRTSoundCap, rsp *x.AllResponse) {
 	arc.resultIndex = rsp.Result.Index
 }
 
-func (s *SpeechRTTrans) Start(onClosed func()) {
+func (s *SpeechRTTrans) Start(onClosed func(), onPause func(), onResume func()) {
 	s.window = fyne.CurrentApp().NewWindow("xaux 聆听")
 	s.window.Resize(fyne.NewSize(800, 256))
 	listObjs := make([]fyne.CanvasObject, 0)
@@ -126,18 +131,40 @@ func (s *SpeechRTTrans) Start(onClosed func()) {
 				contentEntry.Disable()
 			}
 		})
-	s.window.SetContent(container.NewBorder(nil, nil, nil, nil, s.list))
+
+	endButton := widget.NewButtonWithIcon("停止识别", mytheme.ResEnd, nil)
+	endButton.OnTapped = func() {
+		if s.pauseFlag == 0 {
+			endButton.SetIcon(mytheme.ResBegin)
+			endButton.SetText("开始识别")
+			onPause()
+			s.pauseFlag = 1
+		} else {
+			endButton.SetIcon(mytheme.ResEnd)
+			endButton.SetText("停止识别")
+			onResume()
+			s.pauseFlag = 0
+		}
+	}
+
+	l1 := container.NewHBox(endButton, layout.NewSpacer())
+
+	s.window.SetContent(container.NewBorder(l1, nil, nil, nil, s.list))
 	s.window.Show()
 	s.window.SetCloseIntercept(func() {
 		if dialog.Message("退出识别吗？").Title("确认窗").YesNo() {
 			if onClosed != nil {
 				onClosed()
 			}
-			atomic.StoreInt32(&s.running, 0)
-			s.window.Close()
+			s.Close()
 		}
 	})
 	atomic.StoreInt32(&s.running, 1)
+}
+
+func (s *SpeechRTTrans) Close() {
+	atomic.StoreInt32(&s.running, 0)
+	s.window.Close()
 }
 
 func (s *SpeechRTTrans) Release() {
