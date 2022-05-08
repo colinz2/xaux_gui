@@ -32,7 +32,6 @@ type AsrRTSoundCap struct {
 
 func (a *AsrRTSoundCap) CallBack(rsp *x.AllResponse) error {
 	if a.win != nil {
-		fmt.Println(rsp)
 		a.win.AsrUpdateUI(a, rsp)
 	}
 	return nil
@@ -132,6 +131,7 @@ func runRealTimeTrans() {
 		if err := <-scList[i].soundCap.StartDone(); err != nil {
 			panic(fmt.Sprintf("start %s error:%s", scList[i].devName, err.Error()))
 		}
+		time.Sleep(time.Second)
 	}
 
 	srtWin.Start(func() {

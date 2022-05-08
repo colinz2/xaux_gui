@@ -50,7 +50,7 @@ func NewMainWin() *MainWin {
 	mw.win.SetPadded(false)
 	mw.win.CenterOnScreen()
 	mw.win.SetMaster()
-	// mw.win.SetFixedSize(true)
+	mw.win.SetFixedSize(true)
 
 	// quit
 	mw.win.SetCloseIntercept(mw.quitHandle)

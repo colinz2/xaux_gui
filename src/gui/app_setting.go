@@ -60,7 +60,7 @@ func (a *appSetting) LazyInit() error {
 		appQuit()
 	} else {
 		if len(a.speakerName) == 0 {
-			a.speakerName = ffDevs.PlayBackDefault
+			a.speakerName = ffDevs.PlaybackDefault
 		}
 		if len(a.microPhoneName) == 0 {
 			a.microPhoneName = ffDevs.CaptureDefault

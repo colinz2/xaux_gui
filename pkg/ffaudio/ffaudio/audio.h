@@ -241,5 +241,5 @@ FF_EXTERN const ffaudio_interface ffoss;
 /** Get the first available API */
 static inline const ffaudio_interface* ffaudio_default_interface()
 {
-	return &FFAUDIO_INTERFACE_DEFAULT_PTR;
+	return FFAUDIO_INTERFACE_DEFAULT_PTR;
 }

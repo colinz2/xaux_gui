@@ -87,8 +87,8 @@ func (s *SpeechRTTrans) AsrUpdateUI(arc *AsrRTSoundCap, rsp *x.AllResponse) {
 }
 
 func (s *SpeechRTTrans) Start(onClosed func(), onPause func(), onResume func()) {
-	s.window = fyne.CurrentApp().NewWindow("xaux 聆听")
-	s.window.Resize(fyne.NewSize(800, 256))
+	s.window = fyne.CurrentApp().NewWindow("正在聆听")
+	s.window.Resize(fyne.NewSize(1024, 256+128+24))
 	listObjs := make([]fyne.CanvasObject, 0)
 
 	s.list = widget.NewListWithData(s.binding,
@@ -137,17 +137,21 @@ func (s *SpeechRTTrans) Start(onClosed func(), onPause func(), onResume func()) 
 		if s.pauseFlag == 0 {
 			endButton.SetIcon(mytheme.ResBegin)
 			endButton.SetText("开始识别")
+			s.window.SetTitle("聆听停止")
 			onPause()
 			s.pauseFlag = 1
 		} else {
 			endButton.SetIcon(mytheme.ResEnd)
 			endButton.SetText("停止识别")
+			s.window.SetTitle("正在聆听")
 			onResume()
 			s.pauseFlag = 0
 		}
 	}
 
-	l1 := container.NewHBox(endButton, layout.NewSpacer())
+	p1 := widget.NewProgressBar()
+	p2 := widget.NewProgressBar()
+	l1 := container.NewHBox(p1, p2, endButton, layout.NewSpacer())
 
 	s.window.SetContent(container.NewBorder(l1, nil, nil, nil, s.list))
 	s.window.Show()

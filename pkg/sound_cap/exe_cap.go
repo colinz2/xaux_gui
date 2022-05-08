@@ -147,7 +147,8 @@ func (s *SoundCap) close() {
 		return
 	}
 	if s.cmd != nil && s.cmd.Process != nil && s.cmd.ProcessState == nil {
-		s.stdInChan <- "s"
+		//s.stdInChan <- "s"
+		s.cmd.Process.Kill()
 		fmt.Println("quit ffmedi")
 	}
 	if s.asrClient != nil {
@@ -156,6 +157,7 @@ func (s *SoundCap) close() {
 	}
 }
 
+// Resume TODO
 func (s *SoundCap) Resume() error {
 	if err := s.asrClient.Start(x.StartConfig{
 		SampleRate:    int32(s.sampleRate),

@@ -1,3 +1,5 @@
+//go:build windows
+
 package ffaudio
 
 import (
@@ -5,8 +7,11 @@ import (
 	"unsafe"
 )
 
+/*
+#include "ffaudio/wasapi.c"
+*/
 import "C"
 
-func DevInfoFormat(p unsafe.Pointer) string {
+func DevIDFormat(p unsafe.Pointer) string {
 	return windows.UTF16PtrToString((*uint16)(p))
 }

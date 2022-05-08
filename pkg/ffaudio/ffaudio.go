@@ -1,64 +1,15 @@
 package ffaudio
 
 /*
-#include "ffaudio/audio.h"
-#include "ffaudio/wasapi.c"
-
-ffaudio_init_conf* NewConfigFile() {
-	return (ffaudio_init_conf*)malloc(sizeof(ffaudio_init_conf));
-}
-
-void init(ffaudio_init_conf *conf) {
-	ffaudio_default_interface()->init(conf);
-}
-
-void uninit() {
-	ffaudio_default_interface()->uninit();
-}
-
-ffaudio_dev* dev_alloc(ffuint mode) {
-	return ffaudio_default_interface()->dev_alloc(mode);
-}
-
-void dev_free(ffaudio_dev *d) {
-	return ffaudio_default_interface()->dev_free(d);
-}
-
-const char* dev_error(ffaudio_dev *d) {
-	return ffaudio_default_interface()->dev_error(d);
-}
-
-int dev_next(ffaudio_dev *d) {
-	return ffaudio_default_interface()->dev_next(d);
-}
-
-const char* dev_info(ffaudio_dev *d, ffuint i) {
-	return ffaudio_default_interface()->dev_info(d, i);
-}
-
-// windows
-wchar_t* dev_info_DEV_ID(ffaudio_dev *d) {
-	return (wchar_t*)(ffaudio_default_interface()->dev_info(d, FFAUDIO_DEV_ID));
-}
-
-ffuint dev_info_MIX_FORMAT_0(ffaudio_dev *d) {
-	ffuint* a = (ffuint*)ffaudio_default_interface()->dev_info(d, FFAUDIO_DEV_MIX_FORMAT);
-	return a[0];
-}
-ffuint dev_info_MIX_FORMAT_1(ffaudio_dev *d) {
-	ffuint* a = (ffuint*)ffaudio_default_interface()->dev_info(d, FFAUDIO_DEV_MIX_FORMAT);
-	return a[1];
-}
-ffuint dev_info_MIX_FORMAT_2(ffaudio_dev *d) {
-	ffuint* a = (ffuint*)ffaudio_default_interface()->dev_info(d, FFAUDIO_DEV_MIX_FORMAT);
-	return a[2];
-}
-
+#include "ffaudio.h"
 */
 import "C"
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
+	"time"
 	"unsafe"
 )
 
@@ -66,6 +17,35 @@ const (
 	DevTypeLoopBack = "loopback"
 	DevTypeCapture  = "capture"
 )
+
+const (
+	ModePlayBack = C.FFAUDIO_PLAYBACK
+	ModeCapture  = C.FFAUDIO_CAPTURE
+	ModeLoopBack = C.FFAUDIO_LOOPBACK
+)
+
+var (
+	ErrFFAudio            = errors.New("ffAudio error")
+	ErrFFAudioDev         = fmt.Errorf("%w, dev error", ErrFFAudio)
+	ErrFFAudioDevNotFound = fmt.Errorf("%w, dev not found", ErrFFAudio)
+)
+
+type Config struct {
+	AppName          string
+	DeviceName       string
+	BufferLengthMsec int
+}
+
+type FFAudio struct {
+	SampleRate int
+	Format     int
+	Channels   int
+
+	dev    *C.ffaudio_dev
+	devBuf *C.ffaudio_buf
+	Writer io.Writer
+	Reader io.Reader
+}
 
 type DevInfo struct {
 	Name       string
@@ -76,117 +56,129 @@ type DevInfo struct {
 	Channels   int
 }
 
-var (
-	ErrFFAudio    = errors.New("ffAudio error")
-	ErrFFAudioDev = fmt.Errorf("%w, dev error", ErrFFAudio)
-)
-
 func Init() {
 	conf := &C.ffaudio_init_conf{}
-	C.init(conf)
+	C.audio_init(conf)
 }
 
 func UnInit() {
-	C.uninit()
+	C.audio_uninit()
 }
 
-func ListDevPlayback() ([]DevInfo, error) {
-	return ListDev(C.FFAUDIO_DEV_PLAYBACK)
-}
-
-func ListDevCapture() ([]DevInfo, error) {
-	return ListDev(C.FFAUDIO_DEV_CAPTURE)
-}
-
-type DevPlaybackAndCapture struct {
-	PlayBackDefault     string
-	CaptureDefault      string
-	PlayBackDevNameList []string
-	CaptureDevNameList  []string
-}
-
-// FindIndex @return : index, type
-func (d *DevPlaybackAndCapture) FindIndex(devName string) (int, string) {
-	for i := range d.CaptureDevNameList {
-		if devName == d.CaptureDevNameList[i] {
-			return i, DevTypeCapture
-		}
+func findDevID(dev *C.ffaudio_dev, DeviceName string, cConf *C.ffaudio_conf) bool {
+	if dev == nil {
+		return false
 	}
-	for i := range d.PlayBackDevNameList {
-		if devName == d.PlayBackDevNameList[i] {
-			return i, DevTypeLoopBack
-		}
-	}
-	return -1, ""
-}
-
-func GetDevPlaybackAndCapture() (*DevPlaybackAndCapture, error) {
-	dpc := &DevPlaybackAndCapture{}
-	devInfoList, err := ListDevCapture()
-	if err != nil {
-		return nil, err
-	}
-	for i := range devInfoList {
-		dpc.CaptureDevNameList = append(dpc.CaptureDevNameList, devInfoList[i].Name)
-		if devInfoList[i].IsDefault {
-			dpc.CaptureDefault = devInfoList[i].Name
-		}
-	}
-	if len(dpc.CaptureDefault) == 0 && len(devInfoList) > 0 {
-		dpc.CaptureDefault = devInfoList[0].Name
-	}
-
-	devInfoList, err = ListDevPlayback()
-	if err != nil {
-		return nil, err
-	}
-	for i := range devInfoList {
-		dpc.PlayBackDevNameList = append(dpc.PlayBackDevNameList, devInfoList[i].Name)
-		if devInfoList[i].IsDefault {
-			dpc.PlayBackDefault = devInfoList[i].Name
-		}
-	}
-	if len(dpc.PlayBackDefault) == 0 && len(devInfoList) > 0 {
-		dpc.PlayBackDefault = devInfoList[0].Name
-	}
-
-	return dpc, nil
-}
-
-func ListDev(mode C.ffuint) ([]DevInfo, error) {
-	var devs []DevInfo
-	var err error
-	d := C.dev_alloc(mode)
-	if d == nil {
-		return devs, ErrFFAudioDev
-	}
-
 	for {
-		r := C.dev_next(d)
+		r := C.audio_dev_next(dev)
 		if r > 0 {
 			break
 		} else if r < 0 {
-			C.dev_free(d)
-			var errStr string = C.GoString(C.dev_error(d))
-			return nil, fmt.Errorf("%w,%s", ErrFFAudioDev, errStr)
+			break
 		}
-		devIDWStr := DevInfoFormat(unsafe.Pointer(C.dev_info_DEV_ID(d)))
-		isDefault := false
-		if C.dev_info(d, C.FFAUDIO_DEV_IS_DEFAULT) != nil {
-			isDefault = true
+		devName := C.audio_dev_info(dev, C.FFAUDIO_DEV_NAME)
+		if C.GoString(devName) == DeviceName {
+			cConf.device_id = (*C.char)(C.audio_dev_info_DEV_ID(dev))
+			cConf.format = C.audio_dev_info_MIX_FORMAT_0(dev)
+			cConf.sample_rate = C.audio_dev_info_MIX_FORMAT_1(dev)
+			cConf.channels = C.audio_dev_info_MIX_FORMAT_2(dev)
+			return true
 		}
+	}
+	return false
+}
 
-		dev := DevInfo{
-			Name:       C.GoString(C.dev_info(d, C.FFAUDIO_DEV_NAME)),
-			DevIDStr:   devIDWStr,
-			Format:     int(C.dev_info_MIX_FORMAT_0(d)),
-			SampleRate: int(C.dev_info_MIX_FORMAT_1(d)),
-			Channels:   int(C.dev_info_MIX_FORMAT_2(d)),
-			IsDefault:  isDefault,
+func NewFFAudio() *FFAudio {
+	return &FFAudio{}
+}
+
+func (f *FFAudio) allocCAudioConf(conf *Config) *C.ffaudio_conf {
+	cConf := C.ffaudio_conf_alloc()
+	// 延迟释放 f.dev
+	f.dev = C.audio_dev_alloc(C.FFAUDIO_DEV_PLAYBACK)
+	if !findDevID(f.dev, conf.DeviceName, cConf) {
+		if !findDevID(f.dev, conf.DeviceName, cConf) {
+			f.releaseCAudioConf(cConf)
+			return nil
 		}
-		devs = append(devs, dev)
 	}
 
-	C.dev_free(d)
-	return devs, err
+	if conf.BufferLengthMsec != 0 {
+		cConf.buffer_length_msec = C.ffuint(conf.BufferLengthMsec)
+	}
+
+	if len(conf.AppName) != 0 {
+		cConf.app_name = C.CString(conf.AppName)
+	}
+
+	f.Channels = int(cConf.channels)
+	f.SampleRate = int(cConf.sample_rate)
+	f.Format = int(cConf.format)
+	return cConf
+}
+
+func (f *FFAudio) releaseCAudioConf(conf *C.ffaudio_conf) {
+	if conf.app_name != nil {
+		C.free(unsafe.Pointer(conf.app_name))
+		conf.app_name = nil
+	}
+	if conf.device_id != nil {
+		// 释放 f.dev
+		C.audio_dev_free(f.dev)
+		conf.device_id = nil
+	}
+	C.ffaudio_conf_free(conf)
+}
+
+func (f *FFAudio) open(conf *Config, mode int32) error {
+	cConf := f.allocCAudioConf(conf)
+	if cConf == nil {
+		return ErrFFAudioDevNotFound
+	}
+	defer f.releaseCAudioConf(cConf)
+	ret := C.audio_open(f.devBuf, cConf, C.ffuint(mode))
+	if ret != 0 {
+		devErrStr := C.GoString((*C.char)(C.audio_error(f.devBuf)))
+		return fmt.Errorf("%w, %s, code %d, %s",
+			ErrFFAudio, DevIDFormat(unsafe.Pointer(cConf.device_id)), int(ret), string(devErrStr))
+	}
+	return nil
+}
+
+func (f *FFAudio) OpenLoopBack(conf *Config) error {
+	f.devBuf = C.audio_alloc()
+	// |C.FFAUDIO_O_NONBLOCK
+	err := f.open(conf, int32(C.FFAUDIO_LOOPBACK|C.FFAUDIO_O_NONBLOCK))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (f *FFAudio) ListenAndRun(ctx context.Context) error {
+	ctx1, _ := context.WithCancel(ctx)
+	exitChan := make(chan error)
+	cBuf := C.audio_buff_data_alloc()
+	defer C.audio_buff_data_free(cBuf)
+	go func(ctx context.Context) {
+		ticker := time.NewTicker(time.Millisecond * 1)
+		for {
+			select {
+			case <-ctx.Done():
+				goto _exit
+			case <-ticker.C:
+				ret := C.audio_read(f.devBuf, cBuf)
+				if ret > 0 && f.Writer != nil {
+					f.Writer.Write(cBuffToBytes(cBuf))
+				}
+			}
+		}
+	_exit:
+		fmt.Println("exit!!!")
+		ticker.Stop()
+		exitChan <- ctx.Err()
+	}(ctx1)
+
+	<-exitChan
+	return nil
 }

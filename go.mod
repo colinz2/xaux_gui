@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	fyne.io/fyne/v2 v2.1.4
-	github.com/realzhangm/xaux v0.0.0-20220507140449-c602a8a43e6e
+	github.com/realzhangm/xaux v0.0.0-20220508021941-8a010fa33285
 	github.com/sqweek/dialog v0.0.0-20220227145630-7a1c9e333fcf
 	golang.org/x/sys v0.0.0-20220502124256-b6088ccd6cba
 )
