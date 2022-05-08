@@ -8,6 +8,8 @@ const (
 	kSettingMenuName         = "设置"
 	kSpeechMenuName          = "语音"
 	kSpeechMenuRealTimeTrans = "实时转写"
+	kAbout                   = "关于"
+	kGithub                  = "github"
 )
 
 type MainMenu struct {
@@ -16,6 +18,8 @@ type MainMenu struct {
 	setting       *fyne.MenuItem
 	speechMenu    *fyne.Menu
 	realTimeTrans *fyne.MenuItem
+	aboutMenu     *fyne.Menu
+	aboutPage     *fyne.MenuItem
 }
 
 func newMainMenu() *MainMenu {
@@ -41,10 +45,17 @@ func newMainMenu() *MainMenu {
 	})
 	mm.speechMenu = fyne.NewMenu(kSpeechMenuName, mm.realTimeTrans)
 
+	// about
+	mm.aboutPage = fyne.NewMenuItem(kGithub, func() {
+		openGithubPage()
+	})
+	mm.aboutMenu = fyne.NewMenu(kAbout, mm.aboutPage)
+
 	// main menu
 	mm.MainMenu = fyne.NewMainMenu(
 		mm.settingMenu,
 		mm.speechMenu,
+		mm.aboutMenu,
 	)
 	return &mm
 }
