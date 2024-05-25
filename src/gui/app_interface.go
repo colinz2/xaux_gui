@@ -1,9 +1,10 @@
 package gui
 
 import (
+	"sync"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"sync"
 )
 
 type appInterface interface {

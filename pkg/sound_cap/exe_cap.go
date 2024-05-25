@@ -4,11 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"github.com/realzhangm/xaux/pkg/common/doa"
-	"github.com/realzhangm/xaux/pkg/x"
 	"os"
 	"os/exec"
 	"sync/atomic"
+
+	"github.com/realzhangm/xaux/pkg/common/doa"
+	"github.com/realzhangm/xaux/pkg/x"
 )
 
 type SoundCap struct {

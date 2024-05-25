@@ -37,16 +37,26 @@ void* audio_dev_info_DEV_ID(ffaudio_dev *d) {
 	return (void*)(gFFI->dev_info(d, FFAUDIO_DEV_ID));
 }
 
+// 这里应该是 wasapi 专有
 ffuint audio_dev_info_MIX_FORMAT_0(ffaudio_dev *d) {
 	ffuint* a = (ffuint*)gFFI->dev_info(d, FFAUDIO_DEV_MIX_FORMAT);
+	if (a == NULL) {
+	    return 0;
+	}
 	return a[0];
 }
 ffuint audio_dev_info_MIX_FORMAT_1(ffaudio_dev *d) {
 	ffuint* a = (ffuint*)gFFI->dev_info(d, FFAUDIO_DEV_MIX_FORMAT);
+	if (a == NULL) {
+	    return 0;
+	}
 	return a[1];
 }
 ffuint audio_dev_info_MIX_FORMAT_2(ffaudio_dev *d) {
 	ffuint* a = (ffuint*)gFFI->dev_info(d, FFAUDIO_DEV_MIX_FORMAT);
+	if (a == NULL) {
+	    return 0;
+	}
 	return a[2];
 }
 

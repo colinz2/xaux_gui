@@ -2,6 +2,11 @@ package gui
 
 import (
 	"fmt"
+	"sync"
+	"sync/atomic"
+	"time"
+	"xaux_gui/src/mytheme"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/data/binding"
@@ -9,10 +14,6 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/realzhangm/xaux/pkg/x"
 	"github.com/sqweek/dialog"
-	"sync"
-	"sync/atomic"
-	"time"
-	"xaux_gui/src/mytheme"
 )
 
 var (

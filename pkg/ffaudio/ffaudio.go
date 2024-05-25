@@ -79,9 +79,20 @@ func findDevID(dev *C.ffaudio_dev, DeviceName string, cConf *C.ffaudio_conf) boo
 		devName := C.audio_dev_info(dev, C.FFAUDIO_DEV_NAME)
 		if C.GoString(devName) == DeviceName {
 			cConf.device_id = (*C.char)(C.audio_dev_info_DEV_ID(dev))
-			cConf.format = C.audio_dev_info_MIX_FORMAT_0(dev)
-			cConf.sample_rate = C.audio_dev_info_MIX_FORMAT_1(dev)
-			cConf.channels = C.audio_dev_info_MIX_FORMAT_2(dev)
+			format := C.audio_dev_info_MIX_FORMAT_0(dev)
+			if format > 0 {
+				cConf.format = format
+			}
+
+			sampleRate := C.audio_dev_info_MIX_FORMAT_1(dev)
+			if sampleRate > 0 {
+				cConf.sample_rate = sampleRate
+			}
+
+			channels := C.audio_dev_info_MIX_FORMAT_2(dev)
+			if channels > 0 {
+				cConf.channels = channels
+			}
 			return true
 		}
 	}
@@ -97,6 +108,8 @@ func (f *FFAudio) allocCAudioConf(conf *Config) *C.ffaudio_conf {
 	// 延迟释放 f.dev
 	f.dev = C.audio_dev_alloc(C.FFAUDIO_DEV_PLAYBACK)
 	if !findDevID(f.dev, conf.DeviceName, cConf) {
+		f.releaseCAudioConf(cConf)
+		f.dev = C.audio_dev_alloc(C.FFAUDIO_DEV_CAPTURE)
 		if !findDevID(f.dev, conf.DeviceName, cConf) {
 			f.releaseCAudioConf(cConf)
 			return nil
@@ -145,8 +158,11 @@ func (f *FFAudio) open(conf *Config, mode int32) error {
 	return nil
 }
 
-func (f *FFAudio) OpenLoopBack(conf *Config) error {
+func (f *FFAudio) OpenPlayBack(conf *Config) error {
 	f.devBuf = C.audio_alloc()
+	if f.devBuf == nil {
+		panic("f.devBuf is nil")
+	}
 	// |C.FFAUDIO_O_NONBLOCK
 	err := f.open(conf, int32(C.FFAUDIO_LOOPBACK|C.FFAUDIO_O_NONBLOCK))
 	if err != nil {
@@ -168,6 +184,7 @@ func (f *FFAudio) ListenAndRun(ctx context.Context) error {
 				goto _exit
 			case <-ticker.C:
 				ret := C.audio_read(f.devBuf, cBuf)
+				fmt.Println("ret=", ret)
 				if ret > 0 && f.Writer != nil {
 					f.Writer.Write(cBuffToBytes(cBuf))
 				}

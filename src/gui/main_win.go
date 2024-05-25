@@ -2,11 +2,12 @@ package gui
 
 import (
 	"fmt"
+	"xaux_gui/pkg/ffaudio"
+	"xaux_gui/src/mytheme"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
-	"xaux_gui/pkg/ffaudio"
-	"xaux_gui/src/mytheme"
 )
 
 const (

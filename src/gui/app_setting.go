@@ -1,14 +1,14 @@
 package gui
 
 import (
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/layout"
-	"fyne.io/fyne/v2/widget"
 	"os"
 	"path"
 	"xaux_gui/pkg/ffaudio"
 	"xaux_gui/src/mytheme"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
 )
 
 const (
@@ -93,7 +93,8 @@ func (a *appSetting) LazyInit() error {
 		widget.NewLabel("扬声器"),
 		selectEntry,
 		speakerCheck,
-		layout.NewSpacer(),
+	)
+	speakerSetting2 := container.NewHBox(
 		widget.NewLabel("麦克风"),
 		selectEntry2,
 		microPhoneCheck,
@@ -101,9 +102,8 @@ func (a *appSetting) LazyInit() error {
 
 	a.tabItem.Content = container.NewGridWithRows(
 		1,
-		container.NewVBox(
-			speakerSetting,
-		))
+		container.NewVBox(speakerSetting, speakerSetting2),
+	)
 
 	a.ffDevs = ffDevs
 	return nil

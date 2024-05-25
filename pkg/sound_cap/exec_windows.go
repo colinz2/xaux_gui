@@ -3,8 +3,9 @@
 package sound_cap
 
 import (
-	"golang.org/x/sys/windows"
 	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
 var procAttrs = &syscall.SysProcAttr{

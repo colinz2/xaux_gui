@@ -12,6 +12,12 @@ fyne package -os windows -icon ./asset/icon.png --name xaux_gui
 go build -ldflags "-H windowsgui"  .\src\main.go
 ```
 
+### build deps
+- msys2
+#### 
+```shell
+cmake -G "Unix Makefiles" -DBUILD_SHARED_LIBS=ON -DCMAKE_INSTALL_PREFIX=./local ../
+```
 ## 参考：
 
 https://juejin.cn/post/7087845871777218567
