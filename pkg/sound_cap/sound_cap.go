@@ -34,8 +34,9 @@ const (
 )
 
 var (
-	ErrInvalidCaptureMode = errors.New("invalid capture mode")
-	ErrInvalidState       = errors.New("invalid sound capture state")
+	ErrInvalidCaptureMode  = errors.New("invalid capture mode")
+	ErrInvalidState        = errors.New("invalid sound capture state")
+	ErrASRProxyUnavailable = errors.New("ASR proxy unavailable")
 )
 
 type Config struct {
@@ -117,7 +118,7 @@ func NewSoundCap(ctx context.Context, config *Config, asrCb x.AsrResultCallBack)
 		var err error
 		if sc.asrClient, err = x.NewClient(sc.ProxyAddr, asrCb); err != nil {
 			sc.cancel()
-			return nil, fmt.Errorf("connect ASR proxy: %w", err)
+			return nil, fmt.Errorf("%w: connect ASR proxy: %w", ErrASRProxyUnavailable, err)
 		}
 		if err = sc.asrClient.Start(x.StartConfig{
 			SampleRate:    int32(sc.SampleRate),
@@ -125,7 +126,7 @@ func NewSoundCap(ctx context.Context, config *Config, asrCb x.AsrResultCallBack)
 		}); err != nil {
 			sc.asrClient.Close()
 			sc.cancel()
-			return nil, fmt.Errorf("start ASR session: %w", err)
+			return nil, fmt.Errorf("%w: start ASR session: %w", ErrASRProxyUnavailable, err)
 		}
 	}
 	return sc, nil

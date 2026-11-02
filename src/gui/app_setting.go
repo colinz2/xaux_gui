@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"xaux_gui/pkg/ffaudio"
 	"xaux_gui/src/mytheme"
@@ -13,7 +14,10 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-const appSettingName = "设置"
+const (
+	appSettingName        = "开始"
+	sessionRootPreference = "session_root_dir"
+)
 
 var _ appInterface = (*appSetting)(nil)
 
@@ -24,6 +28,7 @@ type Setting struct {
 	microphoneSelected bool
 	proxyAddr          string
 	audioSaveDir       string
+	sessionRootDir     string
 }
 
 type appSetting struct {
@@ -50,6 +55,16 @@ func (a *appSetting) LazyInit() error {
 		}
 	}
 
+	if a.sessionRootDir == "" {
+		a.sessionRootDir = fyne.CurrentApp().Preferences().StringWithFallback(
+			sessionRootPreference,
+			filepath.Join(a.audioSaveDir, "sessions"),
+		)
+	}
+	if err := os.MkdirAll(a.sessionRootDir, 0o755); err != nil {
+		return fmt.Errorf("create session root directory: %w", err)
+	}
+
 	devices, err := ffaudio.GetDevPlaybackAndCapture()
 	if err != nil {
 		return fmt.Errorf("enumerate audio devices: %w", err)
@@ -74,10 +89,15 @@ func (a *appSetting) LazyInit() error {
 		"选择录音和实时转写使用的设备",
 		container.NewVBox(speakerRow, widget.NewSeparator(), microphoneRow),
 	)
+	sessionPanel := widget.NewCard(
+		"会话",
+		"每个任务使用独立子目录保存录音、转写和状态",
+		a.makeSessionRootRow(),
+	)
 	a.tabItem = container.NewTabItemWithIcon(
 		appSettingName,
 		mytheme.ResSettings,
-		container.NewPadded(container.NewVBox(devicePanel)),
+		container.NewPadded(container.NewVBox(devicePanel, sessionPanel)),
 	)
 	return nil
 }
@@ -104,6 +124,22 @@ func (a *appSetting) makeDeviceRow(
 		nil, nil,
 		container.NewCenter(widget.NewLabel(label)),
 		container.NewCenter(check),
+		entry,
+	)
+}
+
+func (a *appSetting) makeSessionRootRow() fyne.CanvasObject {
+	entry := widget.NewEntry()
+	entry.SetPlaceHolder("直接输入会话文件的主保存目录")
+	entry.SetText(a.sessionRootDir)
+	entry.OnChanged = func(path string) {
+		a.sessionRootDir = strings.TrimSpace(path)
+		fyne.CurrentApp().Preferences().SetString(sessionRootPreference, a.sessionRootDir)
+	}
+	return container.NewBorder(
+		nil, nil,
+		container.NewCenter(widget.NewLabel("主保存目录")),
+		nil,
 		entry,
 	)
 }

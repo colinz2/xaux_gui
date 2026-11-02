@@ -41,6 +41,22 @@ func TestNewSoundCapValidatesConfigBeforeConnecting(t *testing.T) {
 	}
 }
 
+func TestNewSoundCapMarksProxyUnavailable(t *testing.T) {
+	capture, err := NewSoundCap(context.Background(), &Config{
+		ProxyAddr: "invalid address",
+		Mode:      CaptureMicrophone,
+	}, nil)
+	if err == nil {
+		if capture != nil {
+			capture.Close()
+		}
+		t.Fatal("expected proxy connection error")
+	}
+	if !errors.Is(err, ErrASRProxyUnavailable) {
+		t.Fatalf("error does not identify an unavailable proxy: %v", err)
+	}
+}
+
 func TestNewSoundCapRecordingOnly(t *testing.T) {
 	capture, err := NewSoundCap(context.Background(), &Config{Mode: CaptureMicrophone}, nil)
 	if err != nil {

@@ -2,6 +2,9 @@ package gui
 
 import (
 	"context"
+	"fmt"
+	"log"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -21,28 +24,39 @@ var recorderWindows struct {
 	active *RecorderWin
 }
 
-// RecorderWin controls two independent recording-only SoundCap sessions.
-// Microphone and speaker audio are deliberately saved to separate WAV files.
+// RecorderWin owns one shared session for each unified recording start.
+// Microphone and speaker audio are saved as separate WAV files in that session.
 type RecorderWin struct {
-	window  fyne.Window
-	sources []*recordSource
-	closed  atomic.Bool
+	window        fyne.Window
+	sources       []*recordSource
+	saveDir       string
+	sessionName   *widget.Entry
+	durationLabel *widget.Label
+	errorLabel    *widget.Label
+	startButton   *widget.Button
+	stopButton    *widget.Button
+	closed        atomic.Bool
+
+	mu            sync.Mutex
+	session       *Session
+	requestedName string
+	duration      *sessionDurationView
 }
 
 type recordSource struct {
 	parent       *RecorderWin
 	title        string
 	deviceName   string
-	saveDir      string
 	mode         sound_cap.CaptureMode
 	isMicrophone bool
-	button       *widget.Button
+	selected     bool
 	status       *widget.Label
 	errorLabel   *widget.Label
 	filePath     *widget.Entry
-	mu           sync.Mutex
-	capture      *sound_cap.SoundCap
-	lastErr      error
+
+	mu      sync.Mutex
+	capture *sound_cap.SoundCap
+	lastErr error
 }
 
 func runRecorder() {
@@ -65,16 +79,23 @@ func runRecorder() {
 		panic(err)
 	}
 	setting := appSetting.Setting
-	win := &RecorderWin{}
+	win := &RecorderWin{
+		saveDir:       setting.sessionRootDir,
+		sessionName:   widget.NewEntry(),
+		durationLabel: widget.NewLabel("时长：--:--:--"),
+		errorLabel:    widget.NewLabel(""),
+	}
+	win.sessionName.SetPlaceHolder("留空则使用当前时间；可自定义本次会话名称")
+	win.errorLabel.Wrapping = fyne.TextWrapBreak
 	win.window = fyne.CurrentApp().NewWindow(recordWindowTitle)
 	win.sources = []*recordSource{
-		newRecordSource(win, "麦克风", setting.microphoneName, setting.audioSaveDir,
-			sound_cap.CaptureMicrophone, true),
-		newRecordSource(win, "扬声器（系统声音）", setting.speakerName, setting.audioSaveDir,
-			sound_cap.CaptureSpeaker, false),
+		newRecordSource(win, "麦克风", setting.microphoneName,
+			sound_cap.CaptureMicrophone, true, setting.microphoneSelected),
+		newRecordSource(win, "扬声器（系统声音）", setting.speakerName,
+			sound_cap.CaptureSpeaker, false, setting.speakerSelected),
 	}
 	win.window.SetContent(win.makeContent())
-	win.window.Resize(fyne.NewSize(920, 570))
+	win.window.Resize(fyne.NewSize(1000, 760))
 	win.window.CenterOnScreen()
 	win.window.SetCloseIntercept(func() {
 		win.closed.Store(true)
@@ -106,33 +127,176 @@ func stopActiveRecorder() {
 }
 
 func (w *RecorderWin) makeContent() fyne.CanvasObject {
-	intro := widget.NewLabel("两路可独立或同时录音，分别保存为 16 kHz、单声道 WAV，不进行混音。")
+	intro := widget.NewLabel("统一开始创建一个会话；已选中的音源分别保存为 16 kHz、单声道 WAV，不进行混音。")
 	intro.Wrapping = fyne.TextWrapBreak
-	saveDir := widget.NewLabel("保存目录：" + w.sources[0].saveDir)
+	saveDir := widget.NewLabel("会话主目录：" + w.saveDir)
 	saveDir.Wrapping = fyne.TextWrapBreak
 
-	startAll := widget.NewButtonWithIcon("开始两路", mytheme.ResBegin, func() {
-		for _, source := range w.sources {
-			source.start()
-		}
-	})
-	stopAll := widget.NewButtonWithIcon("全部停止", mytheme.ResEnd, func() {
-		for _, source := range w.sources {
-			source.stop()
-		}
-	})
-	controls := container.NewHBox(startAll, stopAll)
+	w.startButton = widget.NewButtonWithIcon("开始", mytheme.ResBegin, w.start)
+	w.stopButton = widget.NewButtonWithIcon("结束", mytheme.ResEnd, w.stop)
+	w.stopButton.Disable()
+	if len(w.selectedSources()) == 0 {
+		w.startButton.Disable()
+	}
+	buttonSize := fyne.NewSize(140, 52)
+	controls := container.NewCenter(container.NewHBox(
+		container.NewGridWrap(buttonSize, w.startButton),
+		container.NewGridWrap(buttonSize, w.stopButton),
+	))
 
 	content := container.NewVBox(
 		intro,
 		saveDir,
 		widget.NewSeparator(),
+		container.NewBorder(nil, nil, widget.NewLabel("会话名称"), w.durationLabel, w.sessionName),
+		w.errorLabel,
+		widget.NewSeparator(),
 		w.sources[0].content(),
 		widget.NewSeparator(),
 		w.sources[1].content(),
-		controls,
 	)
-	return container.NewPadded(container.NewVScroll(content))
+	footer := container.NewVBox(widget.NewSeparator(), controls)
+	return container.NewPadded(container.NewBorder(
+		nil, footer, nil, nil,
+		container.NewVScroll(content),
+	))
+}
+
+func (w *RecorderWin) selectedSources() []*recordSource {
+	var selected []*recordSource
+	for _, source := range w.sources {
+		if source.selected {
+			selected = append(selected, source)
+		}
+	}
+	return selected
+}
+
+func (w *RecorderWin) prepareSession(requestedName string) (*Session, map[*recordSource]string, error) {
+	session, err := CreateSession(w.saveDir, requestedName, SessionKindRecording)
+	if err != nil {
+		return nil, nil, err
+	}
+	paths := make(map[*recordSource]string)
+	for _, source := range w.selectedSources() {
+		path := audioFilePath(session.Directory(), source.isMicrophone)
+		if err := session.AddRecording(filepath.Base(path)); err != nil {
+			_ = session.Finish(SessionStatusFailed, nil, err)
+			return nil, nil, err
+		}
+		paths[source] = path
+	}
+	return session, paths, nil
+}
+
+func (w *RecorderWin) start() {
+	if w.closed.Load() {
+		return
+	}
+	w.mu.Lock()
+	active := w.session != nil
+	w.mu.Unlock()
+	if active || len(w.selectedSources()) == 0 {
+		return
+	}
+
+	requestedName := w.sessionName.Text
+	session, paths, err := w.prepareSession(requestedName)
+	if err != nil {
+		w.errorLabel.SetText("错误：" + err.Error())
+		return
+	}
+	info := session.Snapshot()
+	duration := newSessionDurationView(w.durationLabel, info.CreatedAt)
+	w.mu.Lock()
+	w.session = session
+	w.requestedName = requestedName
+	w.duration = duration
+	w.mu.Unlock()
+
+	w.sessionName.SetText(info.Name)
+	w.sessionName.Disable()
+	w.errorLabel.SetText("")
+	w.startButton.Disable()
+	w.stopButton.Enable()
+	for _, source := range w.selectedSources() {
+		if err := source.start(paths[source]); err != nil {
+			log.Printf("start %s recording: %v", source.title, err)
+		}
+	}
+	w.finishIfIdle()
+}
+
+func (w *RecorderWin) stop() {
+	w.mu.Lock()
+	active := w.session != nil
+	w.mu.Unlock()
+	if !active {
+		return
+	}
+	w.stopButton.Disable()
+	for _, source := range w.sources {
+		source.stop()
+	}
+	w.finishIfIdle()
+}
+
+func (w *RecorderWin) finishIfIdle() {
+	w.mu.Lock()
+	active := w.session != nil
+	w.mu.Unlock()
+	if !active {
+		return
+	}
+	for _, source := range w.sources {
+		if source.currentCapture() != nil {
+			return
+		}
+	}
+	w.finishSession()
+}
+
+func (w *RecorderWin) finishSession() {
+	w.mu.Lock()
+	session := w.session
+	if session == nil {
+		w.mu.Unlock()
+		return
+	}
+	requestedName := w.requestedName
+	duration := w.duration
+	w.session = nil
+	w.requestedName = ""
+	w.duration = nil
+	w.mu.Unlock()
+	duration.Stop()
+
+	status := SessionStatusStopped
+	var taskErr error
+	for _, source := range w.sources {
+		if err := source.lastError(); err != nil {
+			status = SessionStatusFailed
+			if taskErr == nil {
+				taskErr = fmt.Errorf("%s: %w", source.title, err)
+			}
+		}
+	}
+	finishErr := session.Finish(status, nil, taskErr)
+	if w.closed.Load() {
+		return
+	}
+
+	w.sessionName.SetText(requestedName)
+	w.sessionName.Enable()
+	if len(w.selectedSources()) > 0 {
+		w.startButton.Enable()
+	}
+	w.stopButton.Disable()
+	if finishErr != nil {
+		w.errorLabel.SetText("错误：保存会话失败：" + finishErr.Error())
+	} else if taskErr != nil {
+		w.errorLabel.SetText("错误：" + taskErr.Error())
+	}
 }
 
 func (w *RecorderWin) stopAllAndWait() {
@@ -149,17 +313,18 @@ func (w *RecorderWin) stopAllAndWait() {
 		}(capture)
 	}
 	wg.Wait()
+	w.finishSession()
 }
 
-func newRecordSource(parent *RecorderWin, title, deviceName, saveDir string,
-	mode sound_cap.CaptureMode, isMicrophone bool) *recordSource {
+func newRecordSource(parent *RecorderWin, title, deviceName string,
+	mode sound_cap.CaptureMode, isMicrophone, selected bool) *recordSource {
 	s := &recordSource{
 		parent:       parent,
 		title:        title,
 		deviceName:   deviceName,
-		saveDir:      saveDir,
 		mode:         mode,
 		isMicrophone: isMicrophone,
+		selected:     selected,
 		status:       widget.NewLabel("未录音"),
 		errorLabel:   widget.NewLabel(""),
 		filePath:     widget.NewMultiLineEntry(),
@@ -169,46 +334,52 @@ func newRecordSource(parent *RecorderWin, title, deviceName, saveDir string,
 	s.filePath.SetMinRowsVisible(2)
 	s.filePath.SetPlaceHolder("开始录音后显示完整文件路径")
 	s.filePath.Disable()
-	s.button = widget.NewButtonWithIcon("开始", mytheme.ResBegin, s.start)
+	if !selected {
+		s.status.SetText("未选中")
+		s.filePath.SetPlaceHolder("未选中，不生成录音文件")
+	}
 	return s
 }
 
 func (s *recordSource) content() fyne.CanvasObject {
 	title := widget.NewLabelWithStyle(s.title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	header := container.NewBorder(nil, nil, title, s.button, s.status)
+	header := container.NewBorder(nil, nil, title, s.status)
 	deviceName := s.deviceName
 	if deviceName == "" {
 		deviceName = "系统默认（开始时检测）"
 	}
 	device := widget.NewLabel("设备：" + deviceName)
 	device.Wrapping = fyne.TextWrapBreak
+	saveFileLabel := widget.NewLabel("保存文件：")
+	if !s.selected {
+		for _, label := range []*widget.Label{title, s.status, device, saveFileLabel} {
+			label.Importance = widget.LowImportance
+		}
+	}
 	return container.NewVBox(
 		header,
 		device,
-		widget.NewLabel("保存文件："),
+		saveFileLabel,
 		s.filePath,
 		s.errorLabel,
 	)
 }
 
-func (s *recordSource) start() {
-	if s.parent.closed.Load() {
-		return
+func (s *recordSource) start(path string) error {
+	if !s.selected || s.parent.closed.Load() {
+		return nil
 	}
 	s.mu.Lock()
 	if s.capture != nil {
 		s.mu.Unlock()
-		return
+		return nil
 	}
 	s.lastErr = nil
 	s.mu.Unlock()
 
-	path := audioFilePath(s.saveDir, s.isMicrophone)
 	s.filePath.SetText(path)
 	s.errorLabel.SetText("")
 	s.status.SetText("正在启动...")
-	s.button.Disable()
-
 	var capture *sound_cap.SoundCap
 	config := &sound_cap.Config{
 		DeviceName:     s.deviceName,
@@ -224,23 +395,29 @@ func (s *recordSource) start() {
 	}
 	capture, err := sound_cap.NewSoundCap(context.Background(), config, nil)
 	if err != nil {
+		s.mu.Lock()
+		s.lastErr = err
+		s.mu.Unlock()
 		s.status.SetText("录音失败")
 		s.errorLabel.SetText("错误：" + err.Error())
-		s.button.Enable()
-		return
+		return err
 	}
 
 	s.mu.Lock()
 	s.capture = capture
 	s.mu.Unlock()
 	if s.parent.closed.Load() {
-		go capture.Close()
-		return
+		go func() {
+			capture.Close()
+			s.onRunFinished(capture, nil)
+		}()
+		return nil
 	}
 	go func() {
 		err := capture.Run()
 		s.onRunFinished(capture, err)
 	}()
+	return nil
 }
 
 func (s *recordSource) stop() {
@@ -253,7 +430,6 @@ func (s *recordSource) stop() {
 		return
 	}
 	s.status.SetText("正在停止...")
-	s.button.Disable()
 	go capture.Close()
 }
 
@@ -267,6 +443,12 @@ func (s *recordSource) isCurrent(capture *sound_cap.SoundCap) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.capture == capture
+}
+
+func (s *recordSource) lastError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastErr
 }
 
 func (s *recordSource) onError(capture *sound_cap.SoundCap, err error) {
@@ -301,26 +483,18 @@ func (s *recordSource) onStateChange(capture *sound_cap.SoundCap, state sound_ca
 			s.status.SetText("正在启动...")
 		case sound_cap.StateRunning:
 			s.status.SetText("录音中")
-			s.button.SetText("停止")
-			s.button.SetIcon(mytheme.ResEnd)
-			s.button.Enable()
 		case sound_cap.StatePaused:
 			s.status.SetText("已暂停")
 		case sound_cap.StateResuming:
 			s.status.SetText("正在恢复...")
 		case sound_cap.StateStopped:
-			s.mu.Lock()
-			hadError := s.lastErr != nil
-			s.mu.Unlock()
-			if hadError {
+			if s.lastError() != nil {
 				s.status.SetText("已停止（有错误）")
 			} else {
 				s.status.SetText("已停止")
 			}
-			s.button.Disable()
 		case sound_cap.StateError:
 			s.status.SetText("录音失败")
-			s.button.Disable()
 		}
 	})
 }
@@ -333,29 +507,29 @@ func (s *recordSource) onRunFinished(capture *sound_cap.SoundCap, runErr error) 
 			return
 		}
 		s.capture = nil
+		if runErr != nil && s.lastErr == nil {
+			s.lastErr = runErr
+		}
 		lastErr := s.lastErr
 		s.mu.Unlock()
-		if s.parent.closed.Load() {
-			return
-		}
 
-		s.button.SetText("开始")
-		s.button.SetIcon(mytheme.ResBegin)
-		s.button.Enable()
-		switch {
-		case capture.State() == sound_cap.StateError:
-			s.status.SetText("录音失败")
-		case lastErr != nil:
-			s.status.SetText("已停止（有错误）")
-		default:
-			s.status.SetText("已停止")
-		}
-		if capture.State() == sound_cap.StateError && s.errorLabel.Text == "" {
-			if runErr != nil {
-				s.errorLabel.SetText("错误：" + runErr.Error())
-			} else {
-				s.errorLabel.SetText("错误：录音失败")
+		if !s.parent.closed.Load() {
+			switch {
+			case capture.State() == sound_cap.StateError:
+				s.status.SetText("录音失败")
+			case lastErr != nil:
+				s.status.SetText("已停止（有错误）")
+			default:
+				s.status.SetText("已停止")
+			}
+			if capture.State() == sound_cap.StateError && s.errorLabel.Text == "" {
+				if runErr != nil {
+					s.errorLabel.SetText("错误：" + runErr.Error())
+				} else {
+					s.errorLabel.SetText("错误：录音失败")
+				}
 			}
 		}
+		s.parent.finishIfIdle()
 	})
 }

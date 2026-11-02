@@ -2,13 +2,19 @@ package gui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"sync/atomic"
 	"time"
 
 	"xaux_gui/pkg/sound_cap"
 
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
+	fyneDialog "fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/widget"
 	"github.com/realzhangm/xaux/pkg/x"
 	"github.com/sqweek/dialog"
 )
@@ -88,28 +94,38 @@ func audioFilePath(dir string, isMicrophone bool) string {
 	return filepath.Join(dir, fileName)
 }
 
-func newASRSoundCaps(setting *Setting) ([]*asrSoundCap, error) {
+func newASRSoundCaps(setting *Setting, session *Session) ([]*asrSoundCap, error) {
 	captures := make([]*asrSoundCap, 0, 2)
-	if setting.microphoneSelected {
+	addCapture := func(isMicrophone bool) error {
+		deviceName := setting.speakerName
+		if isMicrophone {
+			deviceName = setting.microphoneName
+		}
+		path := audioFilePath(session.Directory(), isMicrophone)
+		if err := session.AddRecording(filepath.Base(path)); err != nil {
+			return err
+		}
 		capture, err := newASRSoundCap(
-			context.Background(), setting.proxyAddr, setting.microphoneName,
-			audioFilePath(setting.audioSaveDir, true), true,
+			context.Background(), setting.proxyAddr, deviceName, path, isMicrophone,
 		)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		captures = append(captures, capture)
+		return nil
 	}
-	if setting.speakerSelected {
-		capture, err := newASRSoundCap(
-			context.Background(), setting.proxyAddr, setting.speakerName,
-			audioFilePath(setting.audioSaveDir, false), false,
-		)
-		if err != nil {
+
+	if setting.microphoneSelected {
+		if err := addCapture(true); err != nil {
 			stopASRSoundCaps(captures)
 			return nil, err
 		}
-		captures = append(captures, capture)
+	}
+	if setting.speakerSelected {
+		if err := addCapture(false); err != nil {
+			stopASRSoundCaps(captures)
+			return nil, err
+		}
 	}
 	return captures, nil
 }
@@ -121,8 +137,53 @@ func stopASRSoundCaps(captures []*asrSoundCap) {
 }
 
 func runRealTimeTrans() {
+	nameEntry := widget.NewEntry()
+	nameEntry.SetPlaceHolder("留空则使用当前时间")
+	nameEntryContainer := container.NewGridWrap(
+		fyne.NewSize(380, nameEntry.MinSize().Height),
+		nameEntry,
+	)
+	nameDialog := fyneDialog.NewForm(
+		"新建实时转写会话",
+		"开始",
+		"取消",
+		[]*widget.FormItem{widget.NewFormItem("会话名称", nameEntryContainer)},
+		func(confirmed bool) {
+			if confirmed {
+				startRealTimeTrans(nameEntry.Text)
+			}
+		},
+		currentMainWin.win,
+	)
+	nameDialog.Resize(fyne.NewSize(520, nameDialog.MinSize().Height))
+	nameDialog.Show()
+}
+
+func startRealTimeTrans(requestedName string) {
+	var (
+		window        *speechRTTrans
+		session       *Session
+		captures      []*asrSoundCap
+		windowStarted bool
+	)
 	defer func() {
-		if info := recover(); info != nil {
+		info := recover()
+		if !windowStarted {
+			stopASRSoundCaps(captures)
+			if session != nil {
+				var taskErr error
+				if info != nil {
+					taskErr = fmt.Errorf("%v", info)
+				}
+				if err := session.Finish(SessionStatusFailed, nil, taskErr); err != nil {
+					log.Printf("finish failed transcription session: %v", err)
+				}
+			}
+			if window != nil {
+				window.release()
+			}
+		}
+		if info != nil {
 			dialog.Message("%v", info).Title("打开错误").Error()
 		}
 	}()
@@ -131,27 +192,31 @@ func runRealTimeTrans() {
 	if err != nil {
 		panic(err)
 	}
-	window := newSpeechRTTrans()
+	if setting.proxyAddr == "" {
+		panic("Proxy 未启动或地址未配置，请先启动 Proxy 后重试")
+	}
+	window = newSpeechRTTrans()
 	if window == nil {
 		panic("实时转写窗口已经打开")
 	}
-
-	var captures []*asrSoundCap
-	windowStarted := false
-	defer func() {
-		if !windowStarted {
-			stopASRSoundCaps(captures)
-			window.release()
-		}
-	}()
-	captures, err = newASRSoundCaps(&setting.Setting)
+	session, err = CreateSession(setting.sessionRootDir, requestedName, SessionKindTranscription)
 	if err != nil {
+		panic(err)
+	}
+	captures, err = newASRSoundCaps(&setting.Setting, session)
+	if err != nil {
+		if errors.Is(err, sound_cap.ErrASRProxyUnavailable) {
+			log.Printf("ASR proxy unavailable: %v", err)
+			panic(fmt.Sprintf("Proxy 未启动，请先启动 Proxy 后重试（%s）", setting.proxyAddr))
+		}
 		panic(err)
 	}
 	for _, capture := range captures {
 		capture.target = window
 		go func(capture *asrSoundCap) {
-			_ = capture.Run()
+			if err := capture.Run(); err != nil {
+				window.setRunError(err)
+			}
 		}(capture)
 		if err := <-capture.soundCap.StartDone(); err != nil {
 			panic(fmt.Errorf("start %s: %w", capture.deviceName, err))
@@ -159,8 +224,19 @@ func runRealTimeTrans() {
 		time.Sleep(time.Second)
 	}
 
+	window.sessionStartedAt = session.Snapshot().CreatedAt
 	window.start(
-		func() { stopASRSoundCaps(captures) },
+		func() {
+			stopASRSoundCaps(captures)
+			status := SessionStatusStopped
+			runErr := window.runError()
+			if runErr != nil {
+				status = SessionStatusFailed
+			}
+			if err := session.Finish(status, window.transcriptEntries(), runErr); err != nil {
+				log.Printf("finish transcription session: %v", err)
+			}
+		},
 		func() {
 			for _, capture := range captures {
 				capture.soundCap.Pause()

@@ -44,6 +44,7 @@ func NewMainWin() *MainWin {
 }
 
 func (m *MainWin) quitHandle() {
+	stopActiveTranscription()
 	stopActiveRecorder()
 	ffaudio.UnInit()
 	m.win.Close()

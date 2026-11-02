@@ -18,7 +18,13 @@ import (
 	"github.com/sqweek/dialog"
 )
 
-var speechWindowOpen atomic.Bool
+var (
+	speechWindowOpen atomic.Bool
+	activeSpeech     struct {
+		sync.Mutex
+		window *speechRTTrans
+	}
+)
 
 type transcriptItem struct {
 	deviceName   string
@@ -29,13 +35,19 @@ type transcriptItem struct {
 }
 
 type speechRTTrans struct {
-	binding     binding.UntypedList
-	list        *widget.List
-	window      fyne.Window
-	listItems   []*transcriptItem
-	running     atomic.Bool
-	releaseOnce sync.Once
-	paused      bool
+	binding          binding.UntypedList
+	list             *widget.List
+	window           fyne.Window
+	listItems        []*transcriptItem
+	running          atomic.Bool
+	releaseOnce      sync.Once
+	shutdownOnce     sync.Once
+	onClosed         func()
+	sessionStartedAt time.Time
+	duration         *sessionDurationView
+	runMu            sync.Mutex
+	runErr           error
+	paused           bool
 }
 
 func newSpeechRTTrans() *speechRTTrans {
@@ -95,7 +107,37 @@ func (s *speechRTTrans) applyASRResult(capture *asrSoundCap, response *x.AllResp
 	s.list.ScrollToBottom()
 }
 
+func (s *speechRTTrans) setRunError(err error) {
+	if err == nil {
+		return
+	}
+	s.runMu.Lock()
+	if s.runErr == nil {
+		s.runErr = err
+	}
+	s.runMu.Unlock()
+}
+
+func (s *speechRTTrans) runError() error {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.runErr
+}
+
+func (s *speechRTTrans) transcriptEntries() []SessionTranscriptEntry {
+	entries := make([]SessionTranscriptEntry, 0, len(s.listItems))
+	for _, item := range s.listItems {
+		entries = append(entries, SessionTranscriptEntry{
+			Timestamp: item.timeString,
+			Device:    item.deviceName,
+			Content:   item.content,
+		})
+	}
+	return entries
+}
+
 func (s *speechRTTrans) start(onClosed func(), onPause func(), onResume func()) {
+	s.onClosed = onClosed
 	s.window = fyne.CurrentApp().NewWindow("正在聆听")
 	s.window.Resize(fyne.NewSize(1024, 256+128+24))
 	s.list = widget.NewListWithData(s.binding,
@@ -152,29 +194,68 @@ func (s *speechRTTrans) start(onClosed func(), onPause func(), onResume func()) 
 
 	microphoneProgress := widget.NewProgressBar()
 	speakerProgress := widget.NewProgressBar()
-	controls := container.NewHBox(microphoneProgress, speakerProgress, endButton, layout.NewSpacer())
+	startedAt := s.sessionStartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	s.duration = newSessionDurationView(widget.NewLabel(""), startedAt)
+	controls := container.NewHBox(
+		s.duration.label,
+		microphoneProgress,
+		speakerProgress,
+		endButton,
+		layout.NewSpacer(),
+	)
 	s.window.SetContent(container.NewBorder(controls, nil, nil, nil, s.list))
 	s.window.SetCloseIntercept(func() {
 		if !dialog.Message("退出识别吗？").Title("确认窗").YesNo() {
 			return
 		}
-		if onClosed != nil {
-			onClosed()
-		}
-		s.close()
+		s.shutdown()
 	})
 	s.window.SetOnClosed(s.release)
 	s.window.Show()
 	s.running.Store(true)
+	activeSpeech.Lock()
+	activeSpeech.window = s
+	activeSpeech.Unlock()
+}
+
+func (s *speechRTTrans) shutdown() {
+	s.shutdownOnce.Do(func() {
+		s.duration.Stop()
+		s.duration = nil
+		if s.onClosed != nil {
+			s.onClosed()
+		}
+	})
+	s.close()
 }
 
 func (s *speechRTTrans) close() {
 	s.running.Store(false)
-	s.window.Close()
+	if s.window != nil {
+		s.window.Close()
+	}
+	s.release()
 }
 
 func (s *speechRTTrans) release() {
 	s.releaseOnce.Do(func() {
+		activeSpeech.Lock()
+		if activeSpeech.window == s {
+			activeSpeech.window = nil
+		}
+		activeSpeech.Unlock()
 		speechWindowOpen.Store(false)
 	})
+}
+
+func stopActiveTranscription() {
+	activeSpeech.Lock()
+	window := activeSpeech.window
+	activeSpeech.Unlock()
+	if window != nil {
+		window.shutdown()
+	}
 }
