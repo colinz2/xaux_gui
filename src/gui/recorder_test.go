@@ -35,6 +35,39 @@ func TestUnselectedRecordSourceCannotStart(t *testing.T) {
 	}
 }
 
+func TestRecorderLayoutEmphasizesControlsWithoutEmptyErrorSpace(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+
+	win := &RecorderWin{
+		saveDir:       t.TempDir(),
+		sessionName:   widget.NewEntry(),
+		durationLabel: widget.NewLabel("时长：--:--:--"),
+		errorLabel:    widget.NewLabel(""),
+	}
+	win.setError("")
+	win.sources = []*recordSource{
+		newRecordSource(win, "麦克风", "测试麦克风", sound_cap.CaptureMicrophone, true, true),
+		newRecordSource(win, "扬声器", "测试扬声器", sound_cap.CaptureSpeaker, false, true),
+	}
+	win.makeContent()
+
+	if win.startButton.Text != "开始录音" || win.startButton.Importance != widget.HighImportance {
+		t.Fatalf("start button = %q with importance %v", win.startButton.Text, win.startButton.Importance)
+	}
+	if win.stopButton.Text != "停止录音" || win.stopButton.Importance != widget.DangerImportance {
+		t.Fatalf("stop button = %q with importance %v", win.stopButton.Text, win.stopButton.Importance)
+	}
+	if win.errorLabel.Visible() {
+		t.Fatal("empty recorder error label should not take up layout space")
+	}
+	for _, source := range win.sources {
+		if source.errorLabel.Visible() {
+			t.Fatalf("empty %s error label should not take up layout space", source.title)
+		}
+	}
+}
+
 func TestRecorderSessionGroupsSourcesAndSequencesNames(t *testing.T) {
 	win := &RecorderWin{
 		saveDir: t.TempDir(),
