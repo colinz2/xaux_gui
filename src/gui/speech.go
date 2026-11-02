@@ -3,101 +3,121 @@ package gui
 import (
 	"context"
 	"fmt"
-	"path"
+	"path/filepath"
 	"sync/atomic"
 	"time"
+
 	"xaux_gui/pkg/sound_cap"
 
 	"github.com/realzhangm/xaux/pkg/x"
 	"github.com/sqweek/dialog"
 )
 
-var (
-	audioFileID int64 = 1
-)
+var audioFileID atomic.Uint64
 
-type AsrRTSoundCapWin interface {
-	AsrUpdateUI(arc *AsrRTSoundCap, rsp *x.AllResponse)
+type asrResultTarget interface {
+	updateASRResult(capture *asrSoundCap, response *x.AllResponse)
 }
 
-type AsrRTSoundCap struct {
-	devName        string
+type asrSoundCap struct {
+	deviceName     string
 	soundCap       *sound_cap.SoundCap
-	resultList     []string
 	resultIndex    int
 	writeListIndex int
-	isMicroPhone   bool
-	win            AsrRTSoundCapWin
+	isMicrophone   bool
+	target         asrResultTarget
 }
 
-func (a *AsrRTSoundCap) CallBack(rsp *x.AllResponse) error {
-	if a.win != nil {
-		a.win.AsrUpdateUI(a, rsp)
+func (a *asrSoundCap) onResult(response *x.AllResponse) error {
+	if a.target != nil {
+		a.target.updateASRResult(a, response)
 	}
 	return nil
 }
 
-func (a *AsrRTSoundCap) Run() error {
+func (a *asrSoundCap) Run() error {
 	return a.soundCap.Run()
 }
 
-func (a *AsrRTSoundCap) Stop() {
+func (a *asrSoundCap) Stop() {
 	a.soundCap.Close()
 	a.soundCap.DumpRecordAudio()
 }
 
-func MakeAsrTRSoundCap(ctx context.Context,
-	proxyAddr, devName, savaPath string, isMicroPhone bool) *AsrRTSoundCap {
-	arc := AsrRTSoundCap{
-		devName:      devName,
-		isMicroPhone: isMicroPhone,
-	}
-
+func newASRSoundCap(
+	ctx context.Context,
+	proxyAddr, deviceName, savePath string,
+	isMicrophone bool,
+) (*asrSoundCap, error) {
 	mode := sound_cap.CaptureSpeaker
-	if isMicroPhone {
+	sourceName := "speaker"
+	if isMicrophone {
 		mode = sound_cap.CaptureMicrophone
+		sourceName = "microphone"
 	}
-	var err error
-	arc.soundCap, err = sound_cap.NewSoundCap(ctx, &sound_cap.Config{
+	result := &asrSoundCap{
+		deviceName:     deviceName,
+		resultIndex:    -1,
+		writeListIndex: -1,
+		isMicrophone:   isMicrophone,
+	}
+	capture, err := sound_cap.NewSoundCap(ctx, &sound_cap.Config{
 		ProxyAddr:      proxyAddr,
-		DeviceName:     devName,
+		DeviceName:     deviceName,
 		Mode:           mode,
-		RecordFilePath: savaPath,
-	}, arc.CallBack)
+		RecordFilePath: savePath,
+	}, result.onResult)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("create %s capture: %w", sourceName, err)
 	}
-	return &arc
+	result.soundCap = capture
+	return result, nil
 }
 
-func audioFilePath(dir string, isMicroPhone bool) string {
-	// yyyy-mm-dd-hh-MM-ss_ID_microphone.wav
-	timeStr := time.Now().Format("20060102-150405")
-	fType := "speaker"
-	if isMicroPhone {
-		fType = "microphone"
+func audioFilePath(dir string, isMicrophone bool) string {
+	sourceName := "speaker"
+	if isMicrophone {
+		sourceName = "microphone"
 	}
-	fileExt := "wav"
-	fileName := fmt.Sprintf("%s_%06d_%s.%s", timeStr, atomic.LoadInt64(&audioFileID), fType, fileExt)
-	atomic.AddInt64(&audioFileID, 1)
-	return path.Join(dir, fileName)
+	fileName := fmt.Sprintf(
+		"%s_%06d_%s.wav",
+		time.Now().Format("20060102-150405"),
+		audioFileID.Add(1),
+		sourceName,
+	)
+	return filepath.Join(dir, fileName)
 }
 
-func MakeAsrRTSoundCapListBySetting(setting *Setting) []*AsrRTSoundCap {
-	var list []*AsrRTSoundCap
-	if setting.isMicroPhoneSelected {
-		m := MakeAsrTRSoundCap(context.TODO(), setting.proxyAddr, setting.microPhoneName,
-			audioFilePath(setting.audioSavaDir, true), true)
-		list = append(list, m)
+func newASRSoundCaps(setting *Setting) ([]*asrSoundCap, error) {
+	captures := make([]*asrSoundCap, 0, 2)
+	if setting.microphoneSelected {
+		capture, err := newASRSoundCap(
+			context.Background(), setting.proxyAddr, setting.microphoneName,
+			audioFilePath(setting.audioSaveDir, true), true,
+		)
+		if err != nil {
+			return nil, err
+		}
+		captures = append(captures, capture)
 	}
-
-	if setting.isSpeakerSelected {
-		s := MakeAsrTRSoundCap(context.TODO(), setting.proxyAddr, setting.speakerName,
-			audioFilePath(setting.audioSavaDir, false), false)
-
-		list = append(list, s)
+	if setting.speakerSelected {
+		capture, err := newASRSoundCap(
+			context.Background(), setting.proxyAddr, setting.speakerName,
+			audioFilePath(setting.audioSaveDir, false), false,
+		)
+		if err != nil {
+			stopASRSoundCaps(captures)
+			return nil, err
+		}
+		captures = append(captures, capture)
 	}
-	return list
+	return captures, nil
+}
+
+func stopASRSoundCaps(captures []*asrSoundCap) {
+	for _, capture := range captures {
+		capture.Stop()
+	}
 }
 
 func runRealTimeTrans() {
@@ -107,44 +127,50 @@ func runRealTimeTrans() {
 		}
 	}()
 
-	app, exist := AppResisterMap()[AppSettingName]
-	if !exist {
-		panic("can't find AppSettingName")
+	setting, err := currentAppSetting()
+	if err != nil {
+		panic(err)
 	}
-	appSettingImp := app.(*appSetting)
-	if appSettingImp == nil {
-		panic("appSetting is nil!")
-	}
-	srtWin := NewSpeechRTTrans()
-	if srtWin != nil {
-		defer srtWin.Release()
-	} else {
-		panic("srtWin is nil!")
+	window := newSpeechRTTrans()
+	if window == nil {
+		panic("实时转写窗口已经打开")
 	}
 
-	scList := MakeAsrRTSoundCapListBySetting(&appSettingImp.Setting)
-	for i := range scList {
-		scList[i].win = srtWin
-		go func() {
-			scList[i].Run()
-		}()
-		if err := <-scList[i].soundCap.StartDone(); err != nil {
-			panic(fmt.Sprintf("start %s error:%s", scList[i].devName, err.Error()))
+	var captures []*asrSoundCap
+	windowStarted := false
+	defer func() {
+		if !windowStarted {
+			stopASRSoundCaps(captures)
+			window.release()
+		}
+	}()
+	captures, err = newASRSoundCaps(&setting.Setting)
+	if err != nil {
+		panic(err)
+	}
+	for _, capture := range captures {
+		capture.target = window
+		go func(capture *asrSoundCap) {
+			_ = capture.Run()
+		}(capture)
+		if err := <-capture.soundCap.StartDone(); err != nil {
+			panic(fmt.Errorf("start %s: %w", capture.deviceName, err))
 		}
 		time.Sleep(time.Second)
 	}
 
-	srtWin.Start(func() {
-		for i := range scList {
-			scList[i].Stop()
-		}
-	}, func() {
-		for i := range scList {
-			scList[i].soundCap.Pause()
-		}
-	}, func() {
-		for i := range scList {
-			scList[i].soundCap.Resume()
-		}
-	})
+	window.start(
+		func() { stopASRSoundCaps(captures) },
+		func() {
+			for _, capture := range captures {
+				capture.soundCap.Pause()
+			}
+		},
+		func() {
+			for _, capture := range captures {
+				_ = capture.soundCap.Resume()
+			}
+		},
+	)
+	windowStarted = true
 }

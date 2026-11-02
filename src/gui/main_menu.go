@@ -1,66 +1,37 @@
 package gui
 
 import (
+	"fmt"
+
 	"fyne.io/fyne/v2"
 )
 
 const (
-	kSettingMenuName         = "设置"
-	kSpeechMenuName          = "语音"
-	kSpeechMenuRealTimeTrans = "实时转写"
-	kSpeechMenuRecord        = "录音"
-	kAbout                   = "关于"
-	kGithub                  = "github"
+	speechMenuName        = "语音"
+	realTimeTransMenuName = "实时转写"
+	recordMenuName        = "录音"
+	aboutMenuName         = "关于"
+	githubMenuName        = "github"
 )
 
-type MainMenu struct {
-	*fyne.MainMenu
-	settingMenu   *fyne.Menu
-	setting       *fyne.MenuItem
-	speechMenu    *fyne.Menu
-	realTimeTrans *fyne.MenuItem
-	recorder      *fyne.MenuItem
-	aboutMenu     *fyne.Menu
-	aboutPage     *fyne.MenuItem
-}
-
-func newMainMenu() *MainMenu {
-	var mm MainMenu
-
-	appMap := AppResisterMap()
-	appSetting, exist := appMap[AppSettingName]
-	if !exist {
-		panic("")
+func newMainMenu() *fyne.MainMenu {
+	setting, err := currentAppSetting()
+	if err != nil {
+		panic(err)
 	}
-	// setting
-	mm.setting = fyne.NewMenuItem(appSetting.GetAppName(), func() {
-		err := gMainWin.ac.openApp(appSetting)
-		if err != nil {
-			panic(err)
+	settingItem := fyne.NewMenuItem(setting.GetAppName(), func() {
+		if err := currentMainWin.ac.openApp(setting); err != nil {
+			panic(fmt.Errorf("open settings: %w", err))
 		}
 	})
-	mm.settingMenu = fyne.NewMenu(kSettingMenuName, mm.setting)
 
-	// speech
-	mm.realTimeTrans = fyne.NewMenuItem(kSpeechMenuRealTimeTrans, func() {
-		runRealTimeTrans()
-	})
-	mm.recorder = fyne.NewMenuItem(kSpeechMenuRecord, func() {
-		runRecorder()
-	})
-	mm.speechMenu = fyne.NewMenu(kSpeechMenuName, mm.realTimeTrans, mm.recorder)
+	realTimeTransItem := fyne.NewMenuItem(realTimeTransMenuName, runRealTimeTrans)
+	recordItem := fyne.NewMenuItem(recordMenuName, runRecorder)
+	githubItem := fyne.NewMenuItem(githubMenuName, openGithubPage)
 
-	// about
-	mm.aboutPage = fyne.NewMenuItem(kGithub, func() {
-		openGithubPage()
-	})
-	mm.aboutMenu = fyne.NewMenu(kAbout, mm.aboutPage)
-
-	// main menu
-	mm.MainMenu = fyne.NewMainMenu(
-		mm.settingMenu,
-		mm.speechMenu,
-		mm.aboutMenu,
+	return fyne.NewMainMenu(
+		fyne.NewMenu(appSettingName, settingItem),
+		fyne.NewMenu(speechMenuName, realTimeTransItem, recordItem),
+		fyne.NewMenu(aboutMenuName, githubItem),
 	)
-	return &mm
 }

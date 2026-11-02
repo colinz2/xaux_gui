@@ -7,10 +7,6 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-//func init() {
-//	os.Setenv("FYNE_FONT", "./asset/apr.ttf")
-//}
-
 type MyTheme struct{}
 
 func (MyTheme) Color(c fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {

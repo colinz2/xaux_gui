@@ -2,9 +2,11 @@ package gui
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
+
 	"xaux_gui/src/mytheme"
 
 	"fyne.io/fyne/v2"
@@ -16,162 +18,163 @@ import (
 	"github.com/sqweek/dialog"
 )
 
-var (
-	WinCnt int32 = 0
-)
+var speechWindowOpen atomic.Bool
 
-type ListItem struct {
-	ffDevName    string
-	isMicroPhone bool
+type transcriptItem struct {
+	deviceName   string
+	isMicrophone bool
 	timeString   string
 	content      string
 	final        bool
 }
 
-type SpeechRTTrans struct {
-	binding   binding.UntypedList
-	list      *widget.List
-	window    fyne.Window
-	listIndex int
-	listItems []*ListItem // to show in UI
-	mu        sync.Mutex
-	running   int32
-	pauseFlag int ///button
+type speechRTTrans struct {
+	binding     binding.UntypedList
+	list        *widget.List
+	window      fyne.Window
+	listItems   []*transcriptItem
+	running     atomic.Bool
+	releaseOnce sync.Once
+	paused      bool
 }
 
-func NewSpeechRTTrans() *SpeechRTTrans {
-	if !atomic.CompareAndSwapInt32(&WinCnt, 0, 1) {
-		fmt.Printf("%d \n", WinCnt)
+func newSpeechRTTrans() *speechRTTrans {
+	if !speechWindowOpen.CompareAndSwap(false, true) {
 		return nil
 	}
-
-	return &SpeechRTTrans{
-		binding:   binding.NewUntypedList(),
-		list:      nil,
-		listIndex: -1,
-		listItems: make([]*ListItem, 0),
-	}
+	return &speechRTTrans{binding: binding.NewUntypedList()}
 }
 
-// AsrUpdateUI 跟新 UI
-func (s *SpeechRTTrans) AsrUpdateUI(arc *AsrRTSoundCap, rsp *x.AllResponse) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if atomic.LoadInt32(&s.running) == 0 {
+func (s *speechRTTrans) updateASRResult(capture *asrSoundCap, response *x.AllResponse) {
+	if capture == nil || response == nil {
 		return
 	}
-	if rsp.Type != x.TypeRecognizing && rsp.Type != x.TypeSentenceEnd {
+	if response.Type != x.TypeRecognizing && response.Type != x.TypeSentenceEnd {
+		return
+	}
+	fyne.Do(func() {
+		s.applyASRResult(capture, response)
+	})
+}
+
+func (s *speechRTTrans) applyASRResult(capture *asrSoundCap, response *x.AllResponse) {
+	if !s.running.Load() {
 		return
 	}
 
-	if arc.resultIndex == rsp.Result.Index {
-		index := arc.writeListIndex
-		s.listItems[index].content = rsp.Result.Result
-		s.listItems[index].final = !rsp.Result.Interim
-		s.binding.SetValue(index, s.listItems[index])
-	} else {
-		li := &ListItem{
-			ffDevName:    arc.devName,
-			isMicroPhone: arc.isMicroPhone,
-			timeString:   time.Now().Format("2006-01-02 03:04:05"),
-			content:      rsp.Result.Result,
-			final:        !rsp.Result.Interim,
+	resultIndex := response.Result.Index
+	if capture.resultIndex == resultIndex &&
+		capture.writeListIndex >= 0 && capture.writeListIndex < len(s.listItems) {
+		index := capture.writeListIndex
+		item := s.listItems[index]
+		item.content = response.Result.Result
+		item.final = !response.Result.Interim
+		if err := s.binding.SetValue(index, item); err != nil {
+			log.Printf("update transcript item: %v", err)
+			return
 		}
-		s.listItems = append(s.listItems, li)
-		s.listIndex++
-		arc.writeListIndex = s.listIndex
-		s.binding.Append(li)
+	} else {
+		item := &transcriptItem{
+			deviceName:   capture.deviceName,
+			isMicrophone: capture.isMicrophone,
+			timeString:   time.Now().Format("2006-01-02 03:04:05"),
+			content:      response.Result.Result,
+			final:        !response.Result.Interim,
+		}
+		capture.writeListIndex = len(s.listItems)
+		s.listItems = append(s.listItems, item)
+		if err := s.binding.Append(item); err != nil {
+			s.listItems = s.listItems[:capture.writeListIndex]
+			capture.writeListIndex = -1
+			log.Printf("append transcript item: %v", err)
+			return
+		}
 	}
-	s.list.ScrollToBottom()
+	capture.resultIndex = resultIndex
 	s.list.Refresh()
-	arc.resultIndex = rsp.Result.Index
+	s.list.ScrollToBottom()
 }
 
-func (s *SpeechRTTrans) Start(onClosed func(), onPause func(), onResume func()) {
+func (s *speechRTTrans) start(onClosed func(), onPause func(), onResume func()) {
 	s.window = fyne.CurrentApp().NewWindow("正在聆听")
 	s.window.Resize(fyne.NewSize(1024, 256+128+24))
-	listObjs := make([]fyne.CanvasObject, 0)
-
 	s.list = widget.NewListWithData(s.binding,
 		func() fyne.CanvasObject {
 			timeLabel := widget.NewLabel("")
-			contentL := widget.NewMultiLineEntry()
-			contentL.Wrapping = fyne.TextWrapBreak
-			//contentL.FocusGained()
-			//LineC := container.NewHBox(widget.NewIcon(mytheme.ResSpeakerIcon), contentL)
-			//LineC.Resize(fyne.NewSize(780, 128))
-			//c := container.NewGridWithRows(2, timeLabel, contentL)
-
-			LineC := container.NewHBox(widget.NewIcon(mytheme.ResSpeakerIcon), timeLabel)
-			c := container.NewVBox(LineC, contentL)
-			listObjs = append(listObjs, c)
-			return c
+			contentEntry := widget.NewMultiLineEntry()
+			contentEntry.Wrapping = fyne.TextWrapBreak
+			contentEntry.TextStyle.Bold = true
+			header := container.NewHBox(widget.NewIcon(mytheme.ResSpeakerIcon), timeLabel)
+			return container.NewVBox(header, contentEntry)
 		},
-		func(i binding.DataItem, o fyne.CanvasObject) {
-			di := i.(binding.Untyped)
-			iii, err := di.Get()
+		func(dataItem binding.DataItem, object fyne.CanvasObject) {
+			value, err := dataItem.(binding.Untyped).Get()
 			if err != nil {
+				log.Printf("read transcript item: %v", err)
 				return
 			}
-			li := iii.(*ListItem)
-
-			container := o.(*fyne.Container)
-			labelStr := fmt.Sprintf("%s %s", li.ffDevName, li.timeString)
-			container1 := container.Objects[0].(*fyne.Container)
-			if li.isMicroPhone {
-				container1.Objects[0].(*widget.Icon).SetResource(mytheme.ResMicrophoneIcon)
+			item := value.(*transcriptItem)
+			row := object.(*fyne.Container)
+			header := row.Objects[0].(*fyne.Container)
+			icon := header.Objects[0].(*widget.Icon)
+			if item.isMicrophone {
+				icon.SetResource(mytheme.ResMicrophoneIcon)
 			} else {
-				container1.Objects[0].(*widget.Icon).SetResource(mytheme.ResSpeakerIcon)
+				icon.SetResource(mytheme.ResSpeakerIcon)
 			}
-			container1.Objects[1].(*widget.Label).SetText(labelStr)
-			contentEntry := container.Objects[1].(*widget.Entry)
-			contentEntry.SetText(li.content)
-			contentEntry.TextStyle.Bold = true
-			contentEntry.FocusGained()
-			if li.final {
+			header.Objects[1].(*widget.Label).SetText(fmt.Sprintf("%s %s", item.deviceName, item.timeString))
+			contentEntry := row.Objects[1].(*widget.Entry)
+			contentEntry.SetText(item.content)
+			if item.final {
 				contentEntry.Disable()
+			} else {
+				contentEntry.Enable()
 			}
-		})
+		},
+	)
 
 	endButton := widget.NewButtonWithIcon("停止识别", mytheme.ResEnd, nil)
 	endButton.OnTapped = func() {
-		if s.pauseFlag == 0 {
-			endButton.SetIcon(mytheme.ResBegin)
-			endButton.SetText("开始识别")
-			s.window.SetTitle("聆听停止")
-			onPause()
-			s.pauseFlag = 1
-		} else {
+		if s.paused {
 			endButton.SetIcon(mytheme.ResEnd)
 			endButton.SetText("停止识别")
 			s.window.SetTitle("正在聆听")
 			onResume()
-			s.pauseFlag = 0
+			s.paused = false
+		} else {
+			endButton.SetIcon(mytheme.ResBegin)
+			endButton.SetText("开始识别")
+			s.window.SetTitle("聆听停止")
+			onPause()
+			s.paused = true
 		}
 	}
 
-	p1 := widget.NewProgressBar()
-	p2 := widget.NewProgressBar()
-	l1 := container.NewHBox(p1, p2, endButton, layout.NewSpacer())
-
-	s.window.SetContent(container.NewBorder(l1, nil, nil, nil, s.list))
-	s.window.Show()
+	microphoneProgress := widget.NewProgressBar()
+	speakerProgress := widget.NewProgressBar()
+	controls := container.NewHBox(microphoneProgress, speakerProgress, endButton, layout.NewSpacer())
+	s.window.SetContent(container.NewBorder(controls, nil, nil, nil, s.list))
 	s.window.SetCloseIntercept(func() {
-		if dialog.Message("退出识别吗？").Title("确认窗").YesNo() {
-			if onClosed != nil {
-				onClosed()
-			}
-			s.Close()
+		if !dialog.Message("退出识别吗？").Title("确认窗").YesNo() {
+			return
 		}
+		if onClosed != nil {
+			onClosed()
+		}
+		s.close()
 	})
-	atomic.StoreInt32(&s.running, 1)
+	s.window.SetOnClosed(s.release)
+	s.window.Show()
+	s.running.Store(true)
 }
 
-func (s *SpeechRTTrans) Close() {
-	atomic.StoreInt32(&s.running, 0)
+func (s *speechRTTrans) close() {
+	s.running.Store(false)
 	s.window.Close()
 }
 
-func (s *SpeechRTTrans) Release() {
-	atomic.AddInt32(&WinCnt, -1)
+func (s *speechRTTrans) release() {
+	s.releaseOnce.Do(func() {
+		speechWindowOpen.Store(false)
+	})
 }

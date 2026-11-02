@@ -2,7 +2,6 @@ package gui
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -15,7 +14,7 @@ import (
 	"github.com/sqweek/dialog"
 )
 
-const kRecordWinName = "录音"
+const recordWindowTitle = "录音"
 
 var recorderWindows struct {
 	sync.Mutex
@@ -54,25 +53,24 @@ func runRecorder() {
 	}()
 
 	recorderWindows.Lock()
+	defer recorderWindows.Unlock()
 	if active := recorderWindows.active; active != nil {
 		active.window.Show()
 		active.window.RequestFocus()
-		recorderWindows.Unlock()
 		return
 	}
 
-	app, exist := AppResisterMap()[AppSettingName]
-	if !exist {
-		recorderWindows.Unlock()
-		panic("找不到录音设置")
+	appSetting, err := currentAppSetting()
+	if err != nil {
+		panic(err)
 	}
-	setting := app.(*appSetting).Setting
+	setting := appSetting.Setting
 	win := &RecorderWin{}
-	win.window = fyne.CurrentApp().NewWindow(kRecordWinName)
+	win.window = fyne.CurrentApp().NewWindow(recordWindowTitle)
 	win.sources = []*recordSource{
-		newRecordSource(win, "麦克风", setting.microPhoneName, setting.audioSavaDir,
+		newRecordSource(win, "麦克风", setting.microphoneName, setting.audioSaveDir,
 			sound_cap.CaptureMicrophone, true),
-		newRecordSource(win, "扬声器（系统声音）", setting.speakerName, setting.audioSavaDir,
+		newRecordSource(win, "扬声器（系统声音）", setting.speakerName, setting.audioSaveDir,
 			sound_cap.CaptureSpeaker, false),
 	}
 	win.window.SetContent(win.makeContent())
@@ -93,7 +91,6 @@ func runRecorder() {
 		recorderWindows.Unlock()
 	})
 	recorderWindows.active = win
-	recorderWindows.Unlock()
 	win.window.Show()
 }
 
@@ -146,10 +143,10 @@ func (w *RecorderWin) stopAllAndWait() {
 			continue
 		}
 		wg.Add(1)
-		go func() {
+		go func(capture *sound_cap.SoundCap) {
 			defer wg.Done()
 			capture.Close()
-		}()
+		}(capture)
 	}
 	wg.Wait()
 }
@@ -241,8 +238,8 @@ func (s *recordSource) start() {
 		return
 	}
 	go func() {
-		_ = capture.Run()
-		s.onRunFinished(capture)
+		err := capture.Run()
+		s.onRunFinished(capture, err)
 	}()
 }
 
@@ -328,7 +325,7 @@ func (s *recordSource) onStateChange(capture *sound_cap.SoundCap, state sound_ca
 	})
 }
 
-func (s *recordSource) onRunFinished(capture *sound_cap.SoundCap) {
+func (s *recordSource) onRunFinished(capture *sound_cap.SoundCap, runErr error) {
 	fyne.Do(func() {
 		s.mu.Lock()
 		if s.capture != capture {
@@ -354,7 +351,11 @@ func (s *recordSource) onRunFinished(capture *sound_cap.SoundCap) {
 			s.status.SetText("已停止")
 		}
 		if capture.State() == sound_cap.StateError && s.errorLabel.Text == "" {
-			s.errorLabel.SetText(fmt.Sprintf("错误：录音结束，状态码 %d", capture.State()))
+			if runErr != nil {
+				s.errorLabel.SetText("错误：" + runErr.Error())
+			} else {
+				s.errorLabel.SetText("错误：录音失败")
+			}
 		}
 	})
 }

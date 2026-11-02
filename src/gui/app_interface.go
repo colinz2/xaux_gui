@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"fmt"
 	"sync"
 
 	"fyne.io/fyne/v2"
@@ -8,7 +9,7 @@ import (
 )
 
 type appInterface interface {
-	LazyInit() error // run when click on menu or toolbar to run the app
+	LazyInit() error
 	GetTabItem() *container.TabItem
 	GetAppName() string
 	OpenDefault() bool
@@ -17,33 +18,38 @@ type appInterface interface {
 }
 
 var (
-	_appRegister = []appInterface{
-		MakeAppSetting(),
+	appRegistry = []appInterface{
+		newAppSetting(),
 	}
-	_appRegisterMap map[string]appInterface = nil
-	_mapMutex                               = sync.Mutex{}
+	appRegistryOnce   sync.Once
+	appRegistryByName map[string]appInterface
 )
 
-func AppResister() []appInterface {
-	return _appRegister
+func registeredApps() []appInterface {
+	return appRegistry
 }
 
-func AppResisterMap() map[string]appInterface {
-	var m map[string]appInterface
+func lookupApp(name string) (appInterface, bool) {
+	appRegistryOnce.Do(func() {
+		appRegistryByName = make(map[string]appInterface, len(appRegistry))
+		for _, app := range appRegistry {
+			appRegistryByName[app.GetAppName()] = app
+		}
+	})
+	app, ok := appRegistryByName[name]
+	return app, ok
+}
 
-	_mapMutex.Lock()
-	if _appRegisterMap != nil {
-		m = _appRegisterMap
-		_mapMutex.Unlock()
-		return m
+func currentAppSetting() (*appSetting, error) {
+	app, ok := lookupApp(appSettingName)
+	if !ok {
+		return nil, fmt.Errorf("app %q is not registered", appSettingName)
 	}
-	_appRegisterMap = make(map[string]appInterface)
-	for i := range _appRegister {
-		_appRegisterMap[_appRegister[i].GetAppName()] = _appRegister[i]
+	setting, ok := app.(*appSetting)
+	if !ok || setting == nil {
+		return nil, fmt.Errorf("app %q has an invalid settings instance", appSettingName)
 	}
-	m = _appRegisterMap
-	_mapMutex.Unlock()
-	return m
+	return setting, nil
 }
 
 var _ appInterface = (*appAdapter)(nil)
@@ -53,7 +59,7 @@ type appAdapter struct {
 }
 
 func (a appAdapter) ShortCut() fyne.Shortcut {
-	panic("implement ShortCut")
+	return nil
 }
 
 func (a appAdapter) LazyInit() error {
@@ -65,7 +71,7 @@ func (a appAdapter) GetTabItem() *container.TabItem {
 }
 
 func (a appAdapter) GetAppName() string {
-	panic("implement GetAppName()")
+	panic("implement GetAppName")
 }
 
 func (a appAdapter) OpenDefault() bool {

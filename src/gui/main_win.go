@@ -2,61 +2,44 @@ package gui
 
 import (
 	"fmt"
+
 	"xaux_gui/pkg/ffaudio"
 	"xaux_gui/src/mytheme"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
-	"fyne.io/fyne/v2/container"
 )
 
 const (
-	AppID       = "xaux_gui"
-	MinWinTitle = "xaux GUI"
+	appID           = "xaux_gui"
+	mainWindowTitle = "xaux GUI"
 )
 
-var (
-	gMainWin *MainWin
-)
+var currentMainWin *MainWin
 
 type MainWin struct {
 	app fyne.App
 	win fyne.Window
 	ac  *appContainer
-	mm  *MainMenu
-}
-
-func appQuit() {
-	gMainWin.app.Quit()
 }
 
 func NewMainWin() *MainWin {
-	// app
-	var mw = &MainWin{}
-	mw.app = app.NewWithID(AppID)
+	mw := &MainWin{}
+	mw.app = app.NewWithID(appID)
 	mw.app.SetIcon(mytheme.ResAppIcon)
 	mw.app.Settings().SetTheme(mytheme.MyTheme{})
 
-	// win
-	mw.win = mw.app.NewWindow(MinWinTitle)
-	mw.mm = newMainMenu()
-	mw.win.SetMainMenu(mw.mm.MainMenu)
-
+	mw.win = mw.app.NewWindow(mainWindowTitle)
+	mw.win.SetMainMenu(newMainMenu())
 	mw.ac = newAppContainer()
-	content := container.NewBorder(nil, nil, nil, nil, mw.ac)
-	mw.win.SetContent(content)
-
-	// resize
+	mw.win.SetContent(mw.ac)
 	mw.win.Resize(fyne.NewSize(1000, 600))
 	mw.win.SetPadded(false)
 	mw.win.CenterOnScreen()
 	mw.win.SetMaster()
-	// Long audio device names need room; users can widen the window further.
 	mw.win.SetFixedSize(false)
-
-	// quit
 	mw.win.SetCloseIntercept(mw.quitHandle)
-	gMainWin = mw
+	currentMainWin = mw
 	return mw
 }
 
@@ -64,16 +47,14 @@ func (m *MainWin) quitHandle() {
 	stopActiveRecorder()
 	ffaudio.UnInit()
 	m.win.Close()
-	fmt.Println("main win close!")
 }
 
 func (m *MainWin) Run() {
 	if err := ffaudio.Init(); err != nil {
-		panic(fmt.Sprintf("initialize audio: %v", err))
+		panic(fmt.Errorf("initialize audio: %w", err))
 	}
-	appName, err := m.ac.openDefaultApp()
-	if err != nil {
-		panic("run app deault app " + appName)
+	if err := m.ac.openDefaultApp(); err != nil {
+		panic(fmt.Errorf("open default app: %w", err))
 	}
 	m.win.ShowAndRun()
 }
