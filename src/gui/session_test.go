@@ -111,7 +111,13 @@ func TestSessionHistoryWindow(t *testing.T) {
 	if err := session.AddRecording("microphone.wav"); err != nil {
 		t.Fatal(err)
 	}
+	if err := session.AddRecording("speaker.wav"); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(session.Directory(), "microphone.wav"), []byte("wav"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(session.Directory(), "speaker.wav"), []byte("wav"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.Finish(SessionStatusStopped, []SessionTranscriptEntry{
@@ -125,15 +131,20 @@ func TestSessionHistoryWindow(t *testing.T) {
 	defer win.window.Close()
 	win.buildContent()
 	win.refresh()
+	win.window.Show()
 	if len(win.sessions) != 1 {
 		t.Fatalf("history contains %d sessions, want 1", len(win.sessions))
 	}
 	win.list.Select(0)
-	if win.name.Text != "历史测试" || len(win.recordings.Objects) != 1 {
+	if win.name.Text != "历史测试" || len(win.recordings.Objects) != 2 {
 		t.Fatalf("history details were not populated: %q, %d recordings", win.name.Text, len(win.recordings.Objects))
 	}
 	if !strings.Contains(win.transcript.Text, "历史转写内容") {
 		t.Fatalf("history transcript was not loaded: %q", win.transcript.Text)
+	}
+	transcriptTitle := win.details.Objects[8]
+	if transcriptTitle.Position().Y < win.recordings.Position().Y+win.recordings.Size().Height {
+		t.Fatalf("transcript section overlaps recordings: recordings at %v size %v, transcript at %v", win.recordings.Position(), win.recordings.Size(), transcriptTitle.Position())
 	}
 	if !strings.Contains(win.metadata.Text, "持续时长：00:00:00") {
 		t.Fatalf("history duration was not displayed: %q", win.metadata.Text)

@@ -23,17 +23,19 @@ var sessionHistoryWindows struct {
 }
 
 type sessionHistoryWin struct {
-	window      fyne.Window
-	setting     *appSetting
-	sessions    []SessionInfo
-	list        *widget.List
-	hint        *widget.Label
-	name        *widget.Label
-	metadata    *widget.Label
-	directory   *widget.Label
-	detailError *widget.Label
-	recordings  *fyne.Container
-	transcript  *widget.Entry
+	window       fyne.Window
+	setting      *appSetting
+	sessions     []SessionInfo
+	list         *widget.List
+	hint         *widget.Label
+	name         *widget.Label
+	metadata     *widget.Label
+	directory    *widget.Label
+	detailError  *widget.Label
+	recordings   *fyne.Container
+	transcript   *widget.Entry
+	details      *fyne.Container
+	detailScroll *container.Scroll
 }
 
 func runSessionHistory() {
@@ -112,7 +114,7 @@ func (w *sessionHistoryWin) buildContent() {
 	w.transcript.SetMinRowsVisible(12)
 	w.transcript.SetPlaceHolder("无转写内容")
 	w.transcript.Disable()
-	details := container.NewVBox(
+	w.details = container.NewVBox(
 		w.name,
 		w.metadata,
 		w.directory,
@@ -125,7 +127,8 @@ func (w *sessionHistoryWin) buildContent() {
 		w.transcript,
 	)
 
-	split := container.NewHSplit(left, container.NewVScroll(details))
+	w.detailScroll = container.NewVScroll(w.details)
+	split := container.NewHSplit(left, w.detailScroll)
 	split.Offset = 0.42
 	w.window.SetContent(split)
 }
@@ -153,9 +156,12 @@ func (w *sessionHistoryWin) clearDetails() {
 	w.recordings.Objects = nil
 	w.recordings.Refresh()
 	w.transcript.SetText("")
+	w.detailScroll.Refresh()
 }
 
 func (w *sessionHistoryWin) showSession(info SessionInfo) {
+	defer w.detailScroll.Refresh()
+
 	w.name.SetText(info.Name)
 	endedAt := info.UpdatedAt
 	if info.Status == SessionStatusRunning {
