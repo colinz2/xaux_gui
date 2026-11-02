@@ -47,11 +47,12 @@ func NewMainWin() *MainWin {
 	mw.win.SetContent(content)
 
 	// resize
-	mw.win.Resize(fyne.NewSize(800, 480))
+	mw.win.Resize(fyne.NewSize(1000, 600))
 	mw.win.SetPadded(false)
 	mw.win.CenterOnScreen()
 	mw.win.SetMaster()
-	mw.win.SetFixedSize(true)
+	// Long audio device names need room; users can widen the window further.
+	mw.win.SetFixedSize(false)
 
 	// quit
 	mw.win.SetCloseIntercept(mw.quitHandle)
@@ -60,13 +61,16 @@ func NewMainWin() *MainWin {
 }
 
 func (m *MainWin) quitHandle() {
+	stopActiveRecorder()
 	ffaudio.UnInit()
 	m.win.Close()
 	fmt.Println("main win close!")
 }
 
 func (m *MainWin) Run() {
-	ffaudio.Init()
+	if err := ffaudio.Init(); err != nil {
+		panic(fmt.Sprintf("initialize audio: %v", err))
+	}
 	appName, err := m.ac.openDefaultApp()
 	if err != nil {
 		panic("run app deault app " + appName)

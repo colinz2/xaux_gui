@@ -8,6 +8,7 @@ const (
 	kSettingMenuName         = "设置"
 	kSpeechMenuName          = "语音"
 	kSpeechMenuRealTimeTrans = "实时转写"
+	kSpeechMenuRecord        = "录音"
 	kAbout                   = "关于"
 	kGithub                  = "github"
 )
@@ -18,6 +19,7 @@ type MainMenu struct {
 	setting       *fyne.MenuItem
 	speechMenu    *fyne.Menu
 	realTimeTrans *fyne.MenuItem
+	recorder      *fyne.MenuItem
 	aboutMenu     *fyne.Menu
 	aboutPage     *fyne.MenuItem
 }
@@ -43,7 +45,10 @@ func newMainMenu() *MainMenu {
 	mm.realTimeTrans = fyne.NewMenuItem(kSpeechMenuRealTimeTrans, func() {
 		runRealTimeTrans()
 	})
-	mm.speechMenu = fyne.NewMenu(kSpeechMenuName, mm.realTimeTrans)
+	mm.recorder = fyne.NewMenuItem(kSpeechMenuRecord, func() {
+		runRecorder()
+	})
+	mm.speechMenu = fyne.NewMenu(kSpeechMenuName, mm.realTimeTrans, mm.recorder)
 
 	// about
 	mm.aboutPage = fyne.NewMenuItem(kGithub, func() {

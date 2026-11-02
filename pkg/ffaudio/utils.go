@@ -6,17 +6,8 @@ package ffaudio
 import "C"
 import (
 	"fmt"
-	"reflect"
 	"unsafe"
 )
-
-func cBuffToBytes(cBuff *C.audio_buff_data_t) (b []byte) {
-	bh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
-	bh.Data = uintptr(unsafe.Pointer(cBuff.data))
-	bh.Len = int(cBuff.len)
-	bh.Cap = int(cBuff.len)
-	return b
-}
 
 // 两种设备，发音和收音设备
 
@@ -33,21 +24,6 @@ type DevPlaybackAndCapture struct {
 	CaptureDefault      string
 	PlayBackDevNameList []string
 	CaptureDevNameList  []string
-}
-
-// FindIndex @return : index, type
-func (d *DevPlaybackAndCapture) FindIndex(devName string) (int, string) {
-	for i := range d.CaptureDevNameList {
-		if devName == d.CaptureDevNameList[i] {
-			return i, DevTypeCapture
-		}
-	}
-	for i := range d.PlayBackDevNameList {
-		if devName == d.PlayBackDevNameList[i] {
-			return i, DevTypeLoopBack
-		}
-	}
-	return -1, ""
 }
 
 func GetDevPlaybackAndCapture() (*DevPlaybackAndCapture, error) {
@@ -83,7 +59,7 @@ func GetDevPlaybackAndCapture() (*DevPlaybackAndCapture, error) {
 	return dpc, nil
 }
 
-func ListDev(mode C.ffuint) ([]DevInfo, error) {
+func ListDev(mode C.uint) ([]DevInfo, error) {
 	var devs []DevInfo
 	var err error
 	d := C.audio_dev_alloc(mode)
@@ -96,9 +72,9 @@ func ListDev(mode C.ffuint) ([]DevInfo, error) {
 		if r > 0 {
 			break
 		} else if r < 0 {
+			errStr := C.GoString(C.audio_dev_error(d))
 			C.audio_dev_free(d)
-			var errStr string = C.GoString(C.audio_dev_error(d))
-			return nil, fmt.Errorf("%w,%s", ErrFFAudioDev, errStr)
+			return nil, fmt.Errorf("%w: %s", ErrFFAudioDev, errStr)
 		}
 		devID := unsafe.Pointer(C.audio_dev_info_DEV_ID(d))
 		devIDWStr := DevIDFormat(devID)

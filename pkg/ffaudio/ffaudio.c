@@ -3,8 +3,8 @@
 
 static const ffaudio_interface* gFFI = &FFAUDIO_INTERFACE;
 
-void audio_init(ffaudio_init_conf *conf) {
-	gFFI->init(conf);
+int audio_init(ffaudio_init_conf *conf) {
+	return gFFI->init(conf);
 }
 
 void audio_uninit() {
@@ -76,7 +76,10 @@ const char* audio_error(ffaudio_buf *b) {
 }
 
 ffaudio_conf* ffaudio_conf_alloc() {
-    ffaudio_conf* c = malloc(sizeof(ffaudio_conf));
+    ffaudio_conf* c = calloc(1, sizeof(ffaudio_conf));
+    if (c == NULL) {
+        return NULL;
+    }
     c->format = FFAUDIO_F_INT16; // enum FFAUDIO_F
     c->sample_rate = 16000;
     c->channels = 1;
@@ -101,21 +104,19 @@ int audio_start(ffaudio_buf *b) {
 }
 
 int audio_stop(ffaudio_buf *b) {
-    return gFFI->start(b);
+    return gFFI->stop(b);
 }
 
 int audio_clear(ffaudio_buf *b) {
-    return gFFI->start(b);
+    return gFFI->clear(b);
 }
 
 int audio_drain(ffaudio_buf *b) {
-    return gFFI->start(b);
+    return gFFI->drain(b);
 }
 
 struct audio_buff_data* audio_buff_data_alloc() {
-    struct audio_buff_data* ab = malloc(sizeof(struct audio_buff_data));
-    ab->data = NULL;
-    ab->len = 0;
+    struct audio_buff_data* ab = calloc(1, sizeof(struct audio_buff_data));
     return ab;
 }
 
@@ -131,7 +132,7 @@ int audio_write(ffaudio_buf *b, struct audio_buff_data *inbuf) {
 
 int audio_read(ffaudio_buf *b, struct audio_buff_data *outbuf) {
     int rlen = gFFI->read(b, &outbuf->data);
-    outbuf->len = rlen;
+    outbuf->len = (rlen > 0) ? rlen : 0;
     return rlen;
 }
 

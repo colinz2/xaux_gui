@@ -67,9 +67,11 @@ func (a *appSetting) LazyInit() error {
 		}
 	}
 
-	/// speaker
+	// Speaker. Border layout lets the device entry and its drop-down use all
+	// available width instead of the small minimum width assigned by HBox.
 	selectEntry := widget.NewSelectEntry(ffDevs.PlayBackDevNameList)
-	selectEntry.PlaceHolder = a.speakerName
+	selectEntry.PlaceHolder = "请选择扬声器设备"
+	selectEntry.SetText(a.speakerName)
 	selectEntry.Wrapping = fyne.TextWrapOff
 
 	speakerCheck := widget.NewCheck("选中", func(c bool) {
@@ -78,9 +80,10 @@ func (a *appSetting) LazyInit() error {
 	speakerCheck.Enable()
 	speakerCheck.SetChecked(a.isSpeakerSelected)
 
-	/// microPhone
+	// Microphone
 	selectEntry2 := widget.NewSelectEntry(ffDevs.CaptureDevNameList)
-	selectEntry2.PlaceHolder = a.microPhoneName
+	selectEntry2.PlaceHolder = "请选择麦克风设备"
+	selectEntry2.SetText(a.microPhoneName)
 	selectEntry2.Wrapping = fyne.TextWrapOff
 
 	microPhoneCheck := widget.NewCheck("选中", func(c bool) {
@@ -89,21 +92,29 @@ func (a *appSetting) LazyInit() error {
 	microPhoneCheck.Enable()
 	microPhoneCheck.SetChecked(a.isMicroPhoneSelected)
 
-	speakerSetting := container.NewHBox(
-		widget.NewLabel("扬声器"),
+	speakerSetting := container.NewBorder(
+		nil, nil,
+		container.NewCenter(widget.NewLabel("扬声器")),
+		container.NewCenter(speakerCheck),
 		selectEntry,
-		speakerCheck,
 	)
-	speakerSetting2 := container.NewHBox(
-		widget.NewLabel("麦克风"),
+	microPhoneSetting := container.NewBorder(
+		nil, nil,
+		container.NewCenter(widget.NewLabel("麦克风")),
+		container.NewCenter(microPhoneCheck),
 		selectEntry2,
-		microPhoneCheck,
 	)
 
-	a.tabItem.Content = container.NewGridWithRows(
-		1,
-		container.NewVBox(speakerSetting, speakerSetting2),
+	devicePanel := widget.NewCard(
+		"音频设备",
+		"选择录音和实时转写使用的设备",
+		container.NewVBox(
+			speakerSetting,
+			widget.NewSeparator(),
+			microPhoneSetting,
+		),
 	)
+	a.tabItem.Content = container.NewPadded(container.NewVBox(devicePanel))
 
 	a.ffDevs = ffDevs
 	return nil

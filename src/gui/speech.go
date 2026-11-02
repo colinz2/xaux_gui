@@ -6,7 +6,6 @@ import (
 	"path"
 	"sync/atomic"
 	"time"
-	"xaux_gui/pkg/ffaudio"
 	"xaux_gui/pkg/sound_cap"
 
 	"github.com/realzhangm/xaux/pkg/x"
@@ -48,21 +47,21 @@ func (a *AsrRTSoundCap) Stop() {
 }
 
 func MakeAsrTRSoundCap(ctx context.Context,
-	proxyAddr, devName, savaPath string, isMicroPhone bool,
-	ffDevs *ffaudio.DevPlaybackAndCapture) *AsrRTSoundCap {
-	var err error = nil
+	proxyAddr, devName, savaPath string, isMicroPhone bool) *AsrRTSoundCap {
 	arc := AsrRTSoundCap{
 		devName:      devName,
 		isMicroPhone: isMicroPhone,
 	}
 
-	index, devType := ffDevs.FindIndex(devName)
-	if index < 0 {
-		panic("index < 0")
+	mode := sound_cap.CaptureSpeaker
+	if isMicroPhone {
+		mode = sound_cap.CaptureMicrophone
 	}
+	var err error
 	arc.soundCap, err = sound_cap.NewSoundCap(ctx, &sound_cap.Config{
 		ProxyAddr:      proxyAddr,
-		ExeDevParam:    sound_cap.TransFFMediaDevParam(devType, index),
+		DeviceName:     devName,
+		Mode:           mode,
 		RecordFilePath: savaPath,
 	}, arc.CallBack)
 	if err != nil {
@@ -88,13 +87,13 @@ func MakeAsrRTSoundCapListBySetting(setting *Setting) []*AsrRTSoundCap {
 	var list []*AsrRTSoundCap
 	if setting.isMicroPhoneSelected {
 		m := MakeAsrTRSoundCap(context.TODO(), setting.proxyAddr, setting.microPhoneName,
-			audioFilePath(setting.audioSavaDir, true), true, setting.ffDevs)
+			audioFilePath(setting.audioSavaDir, true), true)
 		list = append(list, m)
 	}
 
 	if setting.isSpeakerSelected {
 		s := MakeAsrTRSoundCap(context.TODO(), setting.proxyAddr, setting.speakerName,
-			audioFilePath(setting.audioSavaDir, false), false, setting.ffDevs)
+			audioFilePath(setting.audioSavaDir, false), false)
 
 		list = append(list, s)
 	}

@@ -3,10 +3,13 @@
 */
 
 #include <ffaudio/audio.h>
+#include <ffaudio/util.h>
 #include <ffbase/string.h>
 #include <ffbase/stringz.h>
 
 #include <alsa/asoundlib.h>
+#include <time.h>
+#include <alloca.h>
 
 
 int ffalsa_init(ffaudio_init_conf *conf)
@@ -188,17 +191,21 @@ void ffalsa_free(ffaudio_buf *b)
 
 static const ffushort fmts[] = {
 	FFAUDIO_F_INT8,
+	FFAUDIO_F_UINT8,
 	FFAUDIO_F_INT16,
 	FFAUDIO_F_INT24,
 	FFAUDIO_F_INT32,
 	FFAUDIO_F_FLOAT32,
+	FFAUDIO_F_FLOAT64,
 };
 static const ffuint alsa_fmts[] = {
 	SND_PCM_FORMAT_S8,
+	SND_PCM_FORMAT_U8,
 	SND_PCM_FORMAT_S16_LE,
 	SND_PCM_FORMAT_S24_3LE,
 	SND_PCM_FORMAT_S32_LE,
 	SND_PCM_FORMAT_FLOAT_LE,
+	SND_PCM_FORMAT_FLOAT64_LE,
 };
 
 static int alsa_find_format(ffuint f)
@@ -216,7 +223,7 @@ static int alsa_find_best_format(snd_pcm_hw_params_t *params, ffuint format)
 	snd_pcm_format_mask_alloca(&mask);
 	snd_pcm_hw_params_get_format_mask(params, mask);
 
-	for (ffuint i = 0;  i != FF_COUNT(alsa_fmts);  i++) {
+	for (int i = FF_COUNT(alsa_fmts)-1;  i >= 0;  i--) {
 		if (snd_pcm_format_mask_test(mask, alsa_fmts[i]))
 			return fmts[i];
 	}
@@ -271,11 +278,10 @@ static int alsa_apply_format(ffaudio_buf *b, snd_pcm_hw_params_t *params, ffaudi
 	return 0;
 }
 
-/** usec -> bytes:
-rate*width*channels*usec/1000 */
+/** usec -> bytes */
 static ffuint buffer_usec_to_size(const ffaudio_conf *conf, ffuint usec)
 {
-	return conf->sample_rate * (conf->format & 0xff) / 8 * conf->channels * usec / 1000000;
+	return (unsigned long long)conf->sample_rate * _ffau_f_bits(conf->format)/8 * conf->channels * usec / 1000000;
 }
 
 int ffalsa_open(ffaudio_buf *b, ffaudio_conf *conf, ffuint flags)
@@ -336,7 +342,7 @@ int ffalsa_open(ffaudio_buf *b, ffaudio_conf *conf, ffuint flags)
 		goto end;
 	}
 
-	b->frame_size = (conf->format & 0xff) / 8 * conf->channels;
+	b->frame_size = _ffau_f_bits(conf->format)/8 * conf->channels;
 	conf->buffer_length_msec = bufsize_usec / 1000;
 	b->period_ms = conf->buffer_length_msec / 3;
 	b->bufsize = buffer_usec_to_size(conf, bufsize_usec);
@@ -353,6 +359,15 @@ end:
 	return rc;
 }
 
+static int _ff_sleep(ffuint msec)
+{
+	struct timespec ts = {
+		.tv_sec = msec / 1000,
+		.tv_nsec = (msec % 1000) * 1000000,
+	};
+	return nanosleep(&ts, NULL);
+}
+
 static int alsa_handle_error(ffaudio_buf *b, int r)
 {
 	switch (r) {
@@ -362,7 +377,7 @@ static int alsa_handle_error(ffaudio_buf *b, int r)
 
 	case -ESTRPIPE:
 		while (-EAGAIN == (r = snd_pcm_resume(b->pcm))) {
-			usleep(b->period_ms*1000);
+			_ff_sleep(b->period_ms);
 		}
 		if (r == 0)
 			return 0;
@@ -377,7 +392,7 @@ static int alsa_handle_error(ffaudio_buf *b, int r)
 	return r;
 }
 
-int ffalsa_start(ffaudio_buf *b)
+int alsa_start(ffaudio_buf *b)
 {
 	int r = snd_pcm_state(b->pcm);
 	if (r == SND_PCM_STATE_RUNNING)
@@ -400,20 +415,51 @@ int ffalsa_start(ffaudio_buf *b)
 	return 0;
 }
 
+int ffalsa_start(ffaudio_buf *b)
+{
+	if (0 != alsa_start(b)) {
+		if (b->err == -EPIPE)
+			return 0;
+		if (0 != alsa_handle_error(b, b->err))
+			return FFAUDIO_ERROR;
+		return alsa_start(b);
+	}
+	return 0;
+}
+
 int ffalsa_stop(ffaudio_buf *b)
 {
 	int r = snd_pcm_state(b->pcm);
 	if (r != SND_PCM_STATE_RUNNING)
 		return 0;
 
-	if (0 != (r = snd_pcm_pause(b->pcm, 1)))
-		return r;
+	if (0 != (r = snd_pcm_pause(b->pcm, 1))) {
+		b->errfunc = "snd_pcm_pause";
+		b->err = r;
+		return FFAUDIO_ERROR;
+	}
 	return 0;
 }
 
 int ffalsa_clear(ffaudio_buf *b)
 {
-	snd_pcm_reset(b->pcm);
+	int r = snd_pcm_state(b->pcm);
+
+	if (r == SND_PCM_STATE_PAUSED) {
+		if (0 != (r = snd_pcm_pause(b->pcm, 0))) {
+			b->errfunc = "snd_pcm_pause";
+			b->err = r;
+			return FFAUDIO_ERROR;
+		}
+	} else if (r == SND_PCM_STATE_XRUN) {
+		return 0;
+	}
+
+	if (0 != (r = snd_pcm_reset(b->pcm))) {
+		b->errfunc = "snd_pcm_reset";
+		b->err = r;
+		return FFAUDIO_ERROR;
+	}
 	return 0;
 }
 
@@ -503,19 +549,20 @@ int ffalsa_write(ffaudio_buf *b, const void *data, ffsize len)
 		int r = alsa_writeonce(b, data, len);
 		if (r > 0) {
 			return r;
-		} else if (r < 0) {
-			if (0 == alsa_handle_error(b, b->err))
-				continue;
-			break;
+		} else if (r == 0) {
+			r = alsa_start(b);
 		}
 
-		if (0 != ffalsa_start(b))
-			break;
+		if (r != 0) {
+			if (0 != alsa_handle_error(b, b->err))
+				break;
+			continue;
+		}
 
 		if (b->nonblock)
 			return 0;
 
-		usleep(b->period_ms*1000);
+		_ff_sleep(b->period_ms);
 	}
 
 	if (b->err == -ENODEV)
@@ -536,7 +583,7 @@ int ffalsa_drain(ffaudio_buf *b)
 		if (b->nonblock)
 			return 0;
 
-		usleep(b->period_ms*1000);
+		_ff_sleep(b->period_ms);
 	}
 }
 
@@ -558,7 +605,7 @@ int ffalsa_read(ffaudio_buf *b, const void **data)
 		if (b->nonblock)
 			return 0;
 
-		usleep(b->period_ms*1000);
+		_ff_sleep(b->period_ms);
 	}
 
 	if (b->err == -ENODEV)
@@ -595,4 +642,5 @@ const struct ffaudio_interface ffalsa = {
 	ffalsa_write,
 	ffalsa_drain,
 	ffalsa_read,
+	NULL,
 };

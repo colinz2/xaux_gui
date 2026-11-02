@@ -3,9 +3,14 @@
 
 #include "ffaudio/audio.h"
 
+// Compatibility aliases for the local cgo wrapper. Upstream uses unsigned and
+// size_t directly in ffaudio_interface.
+typedef unsigned ffuint;
+typedef size_t ffsize;
+
 typedef enum FFAUDIO_OPEN FFAUDIO_OPEN_TYPE;
 
-void audio_init(ffaudio_init_conf *conf);
+int audio_init(ffaudio_init_conf *conf);
 void audio_uninit();
 
 ffaudio_dev* audio_dev_alloc(ffuint mode);

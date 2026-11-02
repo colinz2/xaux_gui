@@ -1,0 +1,532 @@
+/** ffaudio: AAudio
+2023, Simon Zolin
+*/
+
+#include <ffaudio/audio.h>
+#include <ffaudio/util.h>
+#include <ffbase/ring.h>
+#include <aaudio/AAudio.h>
+#include <dlfcn.h>
+
+static int ffaaudio_init(ffaudio_init_conf *conf)
+{
+	return 0;
+}
+
+static void ffaaudio_uninit()
+{
+}
+
+
+struct ffaudio_buf {
+	AAudioStream *as;
+	ffring *ring;
+	ffring_head rhead;
+	ffstr buf1, buf2;
+	ffuint frame_size;
+	ffuint capture :1;
+	ffuint notify_unsync :1;
+	ffuint overrun :1;
+	ffuint nonblock :1;
+	int dev_error;
+	ffuint period_ms;
+
+	void (*on_event)(void*);
+	void *udata;
+
+	const char *err;
+	int errcode;
+	char *errmsg;
+
+	u_char fragment[4 * 8]; // int32|float32 * 8chan
+};
+
+static ffaudio_buf* ffaaudio_alloc()
+{
+	ffaudio_buf *b = ffmem_new(ffaudio_buf);
+	if (b == NULL)
+		return NULL;
+	return b;
+}
+
+static void ffaaudio_free(ffaudio_buf *b)
+{
+	if (b == NULL) return;
+
+	AAudioStream_close(b->as);
+	ffring_free(b->ring);
+	ffmem_free(b->errmsg);
+	ffmem_free(b);
+}
+
+static unsigned buffer_frames_to_msec(const ffaudio_conf *conf, unsigned frames)
+{
+	return frames * 1000 / conf->sample_rate;
+}
+
+static unsigned buffer_msec_to_frames(const ffaudio_conf *conf, unsigned msec)
+{
+	return conf->sample_rate * msec / 1000;
+}
+
+static void on_event_dummy(void *param) {}
+static aaudio_data_callback_result_t on_play(AAudioStream *stream, void *userData, void *audioData, int32_t numFrames);
+static aaudio_data_callback_result_t on_capture(AAudioStream *stream, void *userData, void *audioData, int32_t numFrames);
+
+static void on_error(AAudioStream *stream, void *userData, aaudio_result_t error)
+{
+	ffaudio_buf *b = userData;
+	b->dev_error = error;
+	b->on_event(b->udata);
+}
+
+static int fmt_aa_ffa(ffuint ffa)
+{
+	switch (ffa) {
+	case FFAUDIO_F_INT16: return AAUDIO_FORMAT_PCM_I16;
+	case FFAUDIO_F_INT24: return AAUDIO_FORMAT_PCM_I24_PACKED;
+	case FFAUDIO_F_INT32: return AAUDIO_FORMAT_PCM_I32;
+	case FFAUDIO_F_FLOAT32: return AAUDIO_FORMAT_PCM_FLOAT;
+	}
+	return AAUDIO_FORMAT_PCM_FLOAT;
+}
+
+static ffuint fmt_fa_aa(int aa)
+{
+	switch (aa) {
+	case AAUDIO_FORMAT_PCM_I16: return FFAUDIO_F_INT16;
+	case AAUDIO_FORMAT_PCM_I24_PACKED: return FFAUDIO_F_INT24;
+	case AAUDIO_FORMAT_PCM_I32: return FFAUDIO_F_INT32;
+	case AAUDIO_FORMAT_PCM_FLOAT: return FFAUDIO_F_FLOAT32;
+	}
+	return 0;
+}
+
+static unsigned _ffaa_input_preset(const char *device_id)
+{
+	static const struct {
+		char name[20];
+		u_char preset;
+	} presets[] = {
+		{ "generic",				AAUDIO_INPUT_PRESET_GENERIC },
+		{ "camcorder",				AAUDIO_INPUT_PRESET_CAMCORDER },
+		{ "voice_recognition",		AAUDIO_INPUT_PRESET_VOICE_RECOGNITION },
+		{ "voice_communication",	AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION },
+		{ "unprocessed",			AAUDIO_INPUT_PRESET_UNPROCESSED },
+		{ "voice_performance",		AAUDIO_INPUT_PRESET_VOICE_PERFORMANCE },
+	};
+
+	for (unsigned i = 0;  i < FF_COUNT(presets);  i++) {
+		if (!strcmp(device_id, presets[i].name))
+			return presets[i].preset;
+	}
+
+	return 0;
+}
+
+static void _ffaa_format_best(unsigned *format)
+{
+	*format = FFAUDIO_F_FLOAT32;
+}
+
+static int ffaaudio_open(ffaudio_buf *b, ffaudio_conf *conf, ffuint flags)
+{
+	int rc = FFAUDIO_ERROR, r;
+	AAudioStreamBuilder *asb;
+	if (0 != (r = AAudio_createStreamBuilder(&asb))) {
+		b->err = "AAudio_createStreamBuilder()";
+		b->errcode = r;
+		goto end;
+	}
+
+	b->capture = ((flags & 0x0f) == FFAUDIO_CAPTURE);
+	b->notify_unsync = !!(flags & FFAUDIO_O_UNSYNC_NOTIFY);
+	b->nonblock = !!(flags & FFAUDIO_O_NONBLOCK);
+
+	if (b->capture)
+		AAudioStreamBuilder_setDirection(asb, AAUDIO_DIRECTION_INPUT);
+
+	if (conf->device_id) {
+		typedef AAUDIO_API void (*AAudioStreamBuilder_setInputPreset_t)(AAudioStreamBuilder* builder, aaudio_input_preset_t inputPreset);
+		static AAudioStreamBuilder_setInputPreset_t _AAudioStreamBuilder_setInputPreset;
+		if (!_AAudioStreamBuilder_setInputPreset) {
+			void *dl = dlopen("libaaudio.so", 0);
+			if (dl) {
+				_AAudioStreamBuilder_setInputPreset = dlsym(dl, "AAudioStreamBuilder_setInputPreset");
+				dlclose(dl);
+			}
+		}
+		if (_AAudioStreamBuilder_setInputPreset) {
+			unsigned ip;
+			if (!(ip = _ffaa_input_preset(conf->device_id))) {
+				b->err = "AAudioStreamBuilder_setInputPreset()";
+				b->errcode = 0;
+				goto end;
+			}
+			_AAudioStreamBuilder_setInputPreset(asb, ip);
+		}
+	}
+
+	if (conf->format != 0)
+		AAudioStreamBuilder_setFormat(asb, fmt_aa_ffa(conf->format));
+
+	if (conf->sample_rate != 0)
+		AAudioStreamBuilder_setSampleRate(asb, conf->sample_rate);
+
+	if (conf->channels != 0)
+		AAudioStreamBuilder_setChannelCount(asb, conf->channels);
+
+	unsigned msec = (conf->buffer_length_msec != 0) ? conf->buffer_length_msec : 500;
+	unsigned frames = buffer_msec_to_frames(conf, msec);
+	AAudioStreamBuilder_setBufferCapacityInFrames(asb, frames);
+
+	if (flags & FFAUDIO_O_EXCLUSIVE)
+		AAudioStreamBuilder_setSharingMode(asb, AAUDIO_SHARING_MODE_EXCLUSIVE);
+
+	if (flags & (FFAUDIO_O_POWER_SAVE | FFAUDIO_O_LOW_LATENCY)) {
+		ffuint pm = (flags & FFAUDIO_O_POWER_SAVE) ? AAUDIO_PERFORMANCE_MODE_POWER_SAVING : AAUDIO_PERFORMANCE_MODE_LOW_LATENCY;
+		AAudioStreamBuilder_setPerformanceMode(asb, pm);
+	}
+
+	b->on_event = (conf->on_event != NULL) ? conf->on_event : on_event_dummy;
+	b->udata = conf->udata;
+	AAudioStreamBuilder_setDataCallback(asb, (!b->capture) ? on_play : on_capture, b);
+	AAudioStreamBuilder_setErrorCallback(asb, on_error, b);
+
+	if (0 != (r = AAudioStreamBuilder_openStream(asb, &b->as))) {
+		if (r == AAUDIO_ERROR_INVALID_FORMAT) {
+			_ffaa_format_best(&conf->format);
+			rc = FFAUDIO_EFORMAT;
+			goto end;
+		}
+		b->err = "AAudioStreamBuilder_openStream()";
+		b->errcode = r;
+		goto end;
+	}
+
+	if (flags & FFAUDIO_O_EXCLUSIVE) {
+		if (AAUDIO_SHARING_MODE_EXCLUSIVE != AAudioStream_getSharingMode(b->as)) {
+			b->err = "can't set exclusive mode";
+			b->errcode = 0;
+			goto end;
+		}
+	}
+
+	ffuint ufmt = conf->format;
+	ffuint uchan = conf->channels;
+	ffuint urate = conf->sample_rate;
+	int fmt = AAudioStream_getFormat(b->as);
+	if (0 == (conf->format = fmt_fa_aa(fmt))) {
+		b->errcode = 0;
+		b->err = "format not supported";
+		goto end;
+	}
+	conf->channels = AAudioStream_getChannelCount(b->as);
+	conf->sample_rate = AAudioStream_getSampleRate(b->as);
+	if (!((ufmt == 0 || conf->format == ufmt)
+		&& (uchan == 0 || conf->channels == uchan)
+		&& (urate == 0 || conf->sample_rate == urate))) {
+		rc = FFAUDIO_EFORMAT;
+		goto end;
+	}
+
+	r = AAudioStream_getBufferSizeInFrames(b->as);
+	conf->buffer_length_msec = buffer_frames_to_msec(conf, r);
+	b->period_ms = conf->buffer_length_msec / 4;
+	b->frame_size = _ffau_f_bits(conf->format)/8 * conf->channels;
+
+	ffuint bufsize = _ffau_buf_msec_to_size(conf, conf->buffer_length_msec);
+	if (NULL == (b->ring = ffring_alloc(bufsize, FFRING_1_WRITER))) {
+		b->err = "ffring_alloc()";
+		b->errcode = 0;
+		goto end;
+	}
+
+	rc = 0;
+
+end:
+	if (rc != 0) {
+		AAudioStream_close(b->as);
+		b->as = NULL;
+	}
+	AAudioStreamBuilder_delete(asb);
+	return rc;
+}
+
+static int ffaaudio_start(ffaudio_buf *b)
+{
+	int r = AAudioStream_getState(b->as);
+	if (!(r == AAUDIO_STREAM_STATE_STARTING
+			|| r == AAUDIO_STREAM_STATE_STARTED)) {
+		if (0 != (r = AAudioStream_requestStart(b->as))) {
+			b->err = "AAudioStream_requestStart()";
+			b->errcode = r;
+			return FFAUDIO_ERROR;
+		}
+	}
+	return 0;
+}
+
+static int ffaaudio_stop(ffaudio_buf *b)
+{
+	int r;
+
+	if (!b->capture) {
+		if (0 != (r = AAudioStream_requestPause(b->as))) {
+			b->err = "AAudioStream_requestPause()";
+			goto err;
+		}
+	} else {
+		if (0 != (r = AAudioStream_requestStop(b->as))) {
+			b->err = "AAudioStream_requestStop()";
+			goto err;
+		}
+	}
+
+	return 0;
+
+err:
+	b->errcode = r;
+	return FFAUDIO_ERROR;
+}
+
+static int ffaaudio_clear(ffaudio_buf *b)
+{
+	ffring_read_discard(b->ring);
+
+	int st = AAudioStream_getState(b->as);
+	if (st == AAUDIO_STREAM_STATE_PAUSING)
+		AAudioStream_waitForStateChange(b->as, st, &st, 3000000000ULL);
+
+	int r = AAudioStream_requestFlush(b->as);
+	if (r != 0) {
+		b->err = "AAudioStream_requestFlush()";
+		b->errcode = r;
+		return FFAUDIO_ERROR;
+	}
+
+	return 0;
+}
+
+static aaudio_data_callback_result_t on_capture(AAudioStream *stream, void *userData, void *audioData, int32_t numFrames)
+{
+	ffaudio_buf *b = userData;
+	ffuint n = numFrames * b->frame_size;
+	ffstr d1, d2;
+	ffring_head wh = ffring_write_all_begin(b->ring, n, &d1, &d2, NULL);
+	if (n <= d1.len + d2.len) {
+		ffmem_copy(d1.ptr, audioData, d1.len);
+		if (d2.len)
+			ffmem_copy(d2.ptr, (char*)audioData + d1.len, d2.len);
+	} else {
+		b->overrun = 1;
+	}
+	ffring_write_finish(b->ring, wh, NULL);
+
+	b->on_event(b->udata);
+	return 0;
+}
+
+static int aaudio_read_some(ffaudio_buf *b, const void **buffer)
+{
+	ffstr d1 = b->buf1, d2 = b->buf2;
+
+	if (!d1.len) {
+		ffring_read_finish(b->ring, b->rhead);
+		b->rhead = ffring_read_min_begin(b->ring, b->frame_size, &d1, &d2, NULL);
+	}
+
+	ffuint n = ffint_align_floor(d1.len, b->frame_size);
+	if (n) {
+		*buffer = d1.ptr;
+		ffstr_shift(&d1, n);
+		b->buf1 = d2;
+		if (d1.len) {
+			// Fragmented sample head: "xx....112233xxxx"
+			b->buf1 = d1;
+			b->buf2 = d2;
+		}
+		return n;
+	}
+
+	if (d1.len) {
+		// Fragmented sample tail: "33xxxxxx....1122" -> collect "112233"
+		ffmem_copy(b->fragment, d1.ptr, d1.len);
+		n = b->frame_size - d1.len;
+		FF_ASSERT(d2.len >= n);
+		ffmem_copy(b->fragment + d1.len, d2.ptr, n);
+		ffstr_shift(&d2, n);
+		b->buf1 = d2;
+		b->buf2.len = 0;
+		// Collected full sample in `fragment`
+		*buffer = b->fragment;
+		return b->frame_size;
+	}
+
+	return 0;
+}
+
+static aaudio_data_callback_result_t on_play(AAudioStream *stream, void *userData, void *audioData, int32_t numFrames)
+{
+	ffaudio_buf *b = userData;
+	b->on_event(b->udata);
+
+	unsigned n = numFrames * b->frame_size;
+	ffstr d1, d2;
+	ffring_head h = ffring_read_max_begin(b->ring, n, &d1, &d2, NULL);
+	ffmem_copy(audioData, d1.ptr, d1.len);
+	ffmem_copy((char*)audioData + d1.len, d2.ptr, d2.len);
+	ffring_read_finish(b->ring, h);
+	if (n < d1.len + d2.len) {
+		ffmem_fill((char*)audioData + d1.len + d2.len, 0, n - (d1.len + d2.len));
+		b->overrun = 1;
+	}
+	return 0;
+}
+
+static int aaudio_write_some(ffaudio_buf *b, const void *data, size_t len)
+{
+	ffstr d1, d2;
+	size_t free;
+	ffring_head wh = ffring_write_all_begin(b->ring, len, &d1, &d2, &free);
+	if (!d1.len) {
+		len = ffint_align_floor(free, b->frame_size);
+		if (!len)
+			return 0;
+		wh = ffring_write_all_begin(b->ring, len, &d1, &d2, NULL);
+	}
+	ffmem_copy(d1.ptr, data, d1.len);
+	ffmem_copy(d2.ptr, (char*)data + d1.len, d2.len);
+	ffring_write_finish(b->ring, wh, NULL);
+	return d1.len + d2.len;
+}
+
+static int sleep_msec(unsigned msec)
+{
+	struct timespec ts = {
+		.tv_sec = msec / 1000,
+		.tv_nsec = (msec % 1000) * 1000000,
+	};
+	return nanosleep(&ts, NULL);
+}
+
+static int io_error(ffaudio_buf *b)
+{
+	b->err = "I/O error";
+	b->errcode = b->dev_error;
+	if (b->dev_error == AAUDIO_ERROR_DISCONNECTED)
+		return -FFAUDIO_EDEV_OFFLINE;
+	return -FFAUDIO_ERROR;
+}
+
+static int ffaaudio_write(ffaudio_buf *b, const void *data, ffsize len)
+{
+	for (;;) {
+
+		if (b->dev_error != 0) {
+			return io_error(b);
+		}
+
+		if (b->notify_unsync && b->overrun) {
+			b->overrun = 0;
+			b->err = "buffer underrun";
+			b->errcode = 0;
+			return -FFAUDIO_ESYNC;
+		}
+
+		int r = aaudio_write_some(b, data, len);
+		if (r != 0)
+			return r;
+
+		if (0 != (r = ffaaudio_start(b)))
+			return -r;
+
+		if (b->nonblock)
+			return 0;
+
+		sleep_msec(b->period_ms);
+	}
+}
+
+static int ffaaudio_drain(ffaudio_buf *b)
+{
+	int r;
+	for (;;) {
+
+		if (b->dev_error != 0) {
+			return io_error(b);
+		}
+
+		ffstr s;
+		size_t free;
+		ffring_write_begin(b->ring, 0, &s, &free);
+
+		if (free == b->ring->cap) {
+			(void) ffaaudio_stop(b);
+			return 1;
+		}
+
+		if (0 != (r = ffaaudio_start(b)))
+			return r;
+
+		if (b->nonblock)
+			return 0;
+
+		sleep_msec(b->period_ms);
+	}
+}
+
+static int ffaaudio_read(ffaudio_buf *b, const void **buffer)
+{
+	for (;;) {
+		int r = aaudio_read_some(b, buffer);
+		if (r != 0)
+			return r;
+
+		if (b->dev_error != 0) {
+			return io_error(b);
+		}
+
+		if (b->notify_unsync && b->overrun) {
+			b->overrun = 0;
+			b->err = "buffer overrun";
+			b->errcode = 0;
+			return -FFAUDIO_ESYNC;
+		}
+
+		if (0 != (r = ffaaudio_start(b)))
+			return -r;
+
+		if (b->nonblock)
+			return 0;
+
+		sleep_msec(b->period_ms);
+	}
+}
+
+static const char* ffaaudio_error(ffaudio_buf *b)
+{
+	ffmem_free(b->errmsg);
+	b->errmsg = ffsz_allocfmt("%s: (%d) %s"
+		, b->err, b->errcode, AAudio_convertResultToText(b->errcode));
+	return b->errmsg;
+}
+
+const struct ffaudio_interface ffaaudio = {
+	ffaaudio_init, ffaaudio_uninit,
+
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+
+	ffaaudio_alloc, ffaaudio_free,
+	ffaaudio_error,
+	ffaaudio_open,
+	ffaaudio_start, ffaaudio_stop,
+	ffaaudio_clear,
+	ffaaudio_write, ffaaudio_drain,
+	ffaaudio_read,
+	NULL,
+};

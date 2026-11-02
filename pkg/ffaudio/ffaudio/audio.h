@@ -3,9 +3,11 @@
 */
 
 #pragma once
-
-#include <ffbase/base.h>
-
+#ifdef _WIN32
+	#include <windows.h>
+#else
+	#include <stddef.h>
+#endif
 
 /** Error code */
 enum FFAUDIO_E {
@@ -14,6 +16,10 @@ enum FFAUDIO_E {
 	FFAUDIO_EFORMAT,
 	FFAUDIO_ESYNC,
 	FFAUDIO_EDEV_OFFLINE,
+
+	/** PulseAudio: connection with server failed.
+	Call uninit(), and then init() to reconnect. */
+	FFAUDIO_ECONNECTION,
 };
 
 /** Device type */
@@ -39,18 +45,20 @@ enum FFAUDIO_DEV_INFO {
 	FFAUDIO_DEV_IS_DEFAULT,
 
 	/** Get default format (WASAPI, shared mode)
-	Return ffuint[]:  0:format, 1:sample_rate, 2:channels */
+	Return unsigned[]:  0:format, 1:sample_rate, 2:channels */
 	FFAUDIO_DEV_MIX_FORMAT,
 };
 
 /** Sample format */
 enum FFAUDIO_F {
 	FFAUDIO_F_INT8 = 8,
+	FFAUDIO_F_UINT8 = 8 | 0x0400,
 	FFAUDIO_F_INT16 = 16,
 	FFAUDIO_F_INT24 = 24,
 	FFAUDIO_F_INT24_4 = 32 | 0x0200,
 	FFAUDIO_F_INT32 = 32,
 	FFAUDIO_F_FLOAT32 = 32 | 0x0100,
+	FFAUDIO_F_FLOAT64 = 64 | 0x0100,
 };
 
 enum FFAUDIO_OPEN {
@@ -69,7 +77,7 @@ enum FFAUDIO_OPEN {
 	'ffaudio_conf.on_event()' will be called to notify user */
 	FFAUDIO_O_NONBLOCK = 0x10,
 
-	/** Open device in exclusive mode (WASAPI) */
+	/** Open device in exclusive mode (AAudio, WASAPI) */
 	FFAUDIO_O_EXCLUSIVE = 0x20,
 
 	/** Open "hw" device, instead of "plughw" (ALSA) */
@@ -77,6 +85,14 @@ enum FFAUDIO_OPEN {
 
 	/** Return FFAUDIO_ESYNC when underrun/overrun is detected */
 	FFAUDIO_O_UNSYNC_NOTIFY = 0x80,
+
+	/** Perfomance mode (AAudio) */
+	FFAUDIO_O_POWER_SAVE = 0x0100,
+	FFAUDIO_O_LOW_LATENCY = 0x0200,
+
+	/** WASAPI will set 'ffaudio_conf.event_h'
+	 and let the user perform the signal-delivering work via signal() */
+	FFAUDIO_O_USER_EVENTS = 0x0400,
 };
 
 typedef struct ffaudio_init_conf {
@@ -91,22 +107,46 @@ typedef struct ffaudio_init_conf {
 /** Audio buffer configuration */
 typedef struct ffaudio_conf {
 	/** Audio format */
-	ffuint format; // enum FFAUDIO_F
-	ffuint sample_rate;
-	ffuint channels;
+	unsigned format; // enum FFAUDIO_F
+	unsigned sample_rate;
+	unsigned channels;
 
 	/** Application name for PulseAudio & JACK
 	NULL: use default name */
 	const char *app_name;
 
 	/** Device ID returned by dev_info(FFAUDIO_DEV_ID)
-	NULL: use default device */
+	NULL: use default device
+	AAudio:
+		For opening capture buffer:
+		* "generic"
+		* "camcorder"
+		* "voice_recognition"
+		* "voice_communication"
+		* "unprocessed"
+		* "voice_performance"
+	*/
 	const char *device_id;
 
 	/** Audio buffer size
 	0: use default size
 	On return from open(), this is the actual buffer length from audio subsystem */
-	ffuint buffer_length_msec;
+	unsigned buffer_length_msec;
+
+	/** In a non-blocking mode AAudio calls this function when:
+	* some data becomes available in audio buffer for reading (recording);
+	* free space is available in audio buffer for writing (playback).
+	WARNING: usually this is just for sending a wakeup signal to the main thread;
+	 don't perform I/O inside this function! */
+	void (*on_event)(void*);
+	void *udata;
+
+#ifdef _WIN32
+	/** For non-blocking exclusive mode WASAPI sets this to a newly created Windows Event object.
+	User puts this event into WaitFor...Object()-family functions to receive immediate events.
+	The handle is closed by ffaudio_interface.free(). */
+	HANDLE event_h;
+#endif
 } ffaudio_conf;
 
 typedef struct ffaudio_dev ffaudio_dev;
@@ -131,7 +171,7 @@ typedef struct ffaudio_interface {
 	/** Create audio device listing
 	mode: enum FFAUDIO_DEV
 	Return device object */
-	ffaudio_dev* (*dev_alloc)(ffuint mode);
+	ffaudio_dev* (*dev_alloc)(unsigned mode);
 
 	/** Free device object */
 	void (*dev_free)(ffaudio_dev *d);
@@ -149,7 +189,7 @@ typedef struct ffaudio_interface {
 	/** Get device property
 	i: enum FFAUDIO_DEV_INFO
 	Return value */
-	const char* (*dev_info)(ffaudio_dev *d, ffuint i);
+	const char* (*dev_info)(ffaudio_dev *d, unsigned i);
 
 
 	/** Create audio buffer */
@@ -167,7 +207,7 @@ typedef struct ffaudio_interface {
 	  * 0: success
 	  * FFAUDIO_EFORMAT: input format isn't supported;  the supported format is set inside 'conf'
 	  * FFAUDIO_ERROR: call error() to get error message */
-	int (*open)(ffaudio_buf *b, ffaudio_conf *conf, ffuint flags);
+	int (*open)(ffaudio_buf *b, ffaudio_conf *conf, unsigned flags);
 
 	/** Start/continue streaming
 	Return
@@ -199,7 +239,7 @@ typedef struct ffaudio_interface {
 	  * -FFAUDIO_ERROR: Error
 	  * -FFAUDIO_EDEV_OFFLINE: Device went offline
 	  * -FFAUDIO_ESYNC: Underrun detected (not a fatal error) */
-	int (*write)(ffaudio_buf *b, const void *data, ffsize len);
+	int (*write)(ffaudio_buf *b, const void *data, size_t len);
 
 	/** Wait until the playback buffer is empty
 	The stream must be opened with open(FFAUDIO_PLAYBACK)
@@ -223,9 +263,51 @@ typedef struct ffaudio_interface {
 	    WASAPI exclusive mode: program may crash while accessing the buffer because Windows unmaps the memory region before we can Release() the buffer.
 	  * -FFAUDIO_ESYNC: Overrun detected (not a fatal error) */
 	int (*read)(ffaudio_buf *b, const void **buffer);
+
+	/** WASAPI: user calls this function when 'event_h' signals.
+	This is required for ffaudio to keep track on the buffer's filled data. */
+	void (*signal)(ffaudio_buf *b);
 } ffaudio_interface;
 
+#ifdef __cplusplus
+
+struct xxffaudio_buf {
+	const ffaudio_interface *a;
+	ffaudio_buf *b;
+
+	xxffaudio_buf(const ffaudio_interface *ai) { a = ai; b = a->alloc(); }
+	~xxffaudio_buf() { a->free(b); }
+	const char* error() { return a->error(b); }
+
+	int start() { return a->start(b); }
+	int stop() { return a->stop(b); }
+	int clear() { return a->clear(b); }
+};
+
+struct xxffaudio_play_buf : xxffaudio_buf {
+	xxffaudio_play_buf(const ffaudio_interface *ai) : xxffaudio_buf(ai) {}
+	int open(ffaudio_conf *conf, unsigned flags) { return a->open(b, conf, FFAUDIO_PLAYBACK | flags); }
+	int write(const void *data, size_t len) { return a->write(b, data, len); }
+	int drain() { return a->drain(b); }
+};
+
+struct xxffaudio_rec_buf : xxffaudio_buf {
+	xxffaudio_rec_buf(const ffaudio_interface *ai) : xxffaudio_buf(ai) {}
+	int open(ffaudio_conf *conf, unsigned flags) { return a->open(b, conf, FFAUDIO_CAPTURE | flags); }
+	int read(const void **buffer) { return a->read(b, buffer); }
+};
+
+#endif
+
 /** API for direct use */
+#ifndef FF_EXTERN
+	#ifdef __cplusplus
+		#define FF_EXTERN extern "C"
+	#else
+		#define FF_EXTERN extern
+	#endif
+#endif
+FF_EXTERN const ffaudio_interface ffaaudio;
 FF_EXTERN const ffaudio_interface ffalsa;
 FF_EXTERN const ffaudio_interface ffpulse;
 FF_EXTERN const ffaudio_interface ffjack;
