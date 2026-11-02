@@ -29,6 +29,27 @@ func TestFormatSessionDuration(t *testing.T) {
 	}
 }
 
+func TestSessionDurationViewPauseAndResume(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+	view := newSessionDurationView(widget.NewLabel(""), time.Now())
+	defer view.Stop()
+
+	time.Sleep(20 * time.Millisecond)
+	view.Pause()
+	pausedAt := view.elapsedAt(time.Now())
+	time.Sleep(20 * time.Millisecond)
+	if elapsed := view.elapsedAt(time.Now()); elapsed-pausedAt > 5*time.Millisecond {
+		t.Fatalf("duration kept increasing while paused: before=%v after=%v", pausedAt, elapsed)
+	}
+
+	view.Resume()
+	time.Sleep(20 * time.Millisecond)
+	if elapsed := view.elapsedAt(time.Now()); elapsed-pausedAt < 10*time.Millisecond {
+		t.Fatalf("duration did not resume: before=%v after=%v", pausedAt, elapsed)
+	}
+}
+
 func TestSessionDurationViewStop(t *testing.T) {
 	app := fynetest.NewApp()
 	defer app.Quit()

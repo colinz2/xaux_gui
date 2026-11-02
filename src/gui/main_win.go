@@ -2,6 +2,7 @@ package gui
 
 import (
 	"fmt"
+	"sync/atomic"
 
 	"xaux_gui/pkg/ffaudio"
 	"xaux_gui/src/mytheme"
@@ -18,9 +19,10 @@ const (
 var currentMainWin *MainWin
 
 type MainWin struct {
-	app fyne.App
-	win fyne.Window
-	ac  *appContainer
+	app      fyne.App
+	win      fyne.Window
+	ac       *appContainer
+	quitting atomic.Bool
 }
 
 func NewMainWin() *MainWin {
@@ -44,10 +46,18 @@ func NewMainWin() *MainWin {
 }
 
 func (m *MainWin) quitHandle() {
-	stopActiveTranscription()
-	stopActiveRecorder()
-	ffaudio.UnInit()
-	m.win.Close()
+	if !m.quitting.CompareAndSwap(false, true) {
+		return
+	}
+	transcriptionDone := stopActiveTranscription()
+	go func() {
+		if transcriptionDone != nil {
+			<-transcriptionDone
+		}
+		stopActiveRecorder()
+		ffaudio.UnInit()
+		fyne.DoAndWait(m.win.Close)
+	}()
 }
 
 func (m *MainWin) Run() {

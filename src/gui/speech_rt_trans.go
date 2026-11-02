@@ -11,11 +11,10 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/data/binding"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/realzhangm/xaux/pkg/x"
-	"github.com/sqweek/dialog"
 )
 
 var (
@@ -34,27 +33,46 @@ type transcriptItem struct {
 	final        bool
 }
 
+type transcriptRow struct {
+	content   *widget.Label
+	status    *widget.Label
+	container *fyne.Container
+}
+
 type speechRTTrans struct {
-	binding          binding.UntypedList
-	list             *widget.List
 	window           fyne.Window
 	listItems        []*transcriptItem
+	rows             []*transcriptRow
+	transcript       *fyne.Container
+	emptyState       *widget.Label
+	scroll           *container.Scroll
+	status           *widget.Label
+	duration         *sessionDurationView
+	pauseButton      *widget.Button
+	stopButton       *widget.Button
+	latestButton     *widget.Button
 	running          atomic.Bool
+	stopping         atomic.Bool
 	releaseOnce      sync.Once
 	shutdownOnce     sync.Once
 	onClosed         func()
+	onPause          func() error
+	onResume         func() error
+	shutdownDone     chan struct{}
 	sessionStartedAt time.Time
-	duration         *sessionDurationView
 	runMu            sync.Mutex
 	runErr           error
 	paused           bool
+	transitioning    bool
+	stopRequested    bool
+	followLatest     bool
 }
 
 func newSpeechRTTrans() *speechRTTrans {
 	if !speechWindowOpen.CompareAndSwap(false, true) {
 		return nil
 	}
-	return &speechRTTrans{binding: binding.NewUntypedList()}
+	return &speechRTTrans{followLatest: true, shutdownDone: make(chan struct{})}
 }
 
 func (s *speechRTTrans) updateASRResult(capture *asrSoundCap, response *x.AllResponse) {
@@ -73,38 +91,94 @@ func (s *speechRTTrans) applyASRResult(capture *asrSoundCap, response *x.AllResp
 	if !s.running.Load() {
 		return
 	}
+	if s.transcript == nil || s.scroll == nil {
+		return
+	}
 
 	resultIndex := response.Result.Index
+	content := response.Result.Result
 	if capture.resultIndex == resultIndex &&
 		capture.writeListIndex >= 0 && capture.writeListIndex < len(s.listItems) {
 		index := capture.writeListIndex
 		item := s.listItems[index]
-		item.content = response.Result.Result
+		item.content = content
 		item.final = !response.Result.Interim
-		if err := s.binding.SetValue(index, item); err != nil {
-			log.Printf("update transcript item: %v", err)
+		s.updateTranscriptRow(index, item)
+	} else {
+		if content == "" {
 			return
 		}
-	} else {
 		item := &transcriptItem{
 			deviceName:   capture.deviceName,
 			isMicrophone: capture.isMicrophone,
-			timeString:   time.Now().Format("2006-01-02 03:04:05"),
-			content:      response.Result.Result,
+			timeString:   time.Now().Format("2006-01-02 15:04:05"),
+			content:      content,
 			final:        !response.Result.Interim,
 		}
 		capture.writeListIndex = len(s.listItems)
-		s.listItems = append(s.listItems, item)
-		if err := s.binding.Append(item); err != nil {
-			s.listItems = s.listItems[:capture.writeListIndex]
-			capture.writeListIndex = -1
-			log.Printf("append transcript item: %v", err)
-			return
+		if len(s.listItems) == 0 {
+			s.transcript.Objects = nil
 		}
+		s.listItems = append(s.listItems, item)
+		s.rows = append(s.rows, s.newTranscriptRow(item))
+		if len(s.rows) > 1 {
+			s.transcript.Objects = append(s.transcript.Objects, widget.NewSeparator())
+		}
+		s.transcript.Objects = append(s.transcript.Objects, s.rows[len(s.rows)-1].container)
 	}
 	capture.resultIndex = resultIndex
-	s.list.Refresh()
-	s.list.ScrollToBottom()
+	s.transcript.Refresh()
+	s.scroll.Refresh()
+	s.updateTranscriptFollow()
+}
+
+func (s *speechRTTrans) newTranscriptRow(item *transcriptItem) *transcriptRow {
+	icon := widget.NewIcon(mytheme.ResSpeakerIcon)
+	if item.isMicrophone {
+		icon.SetResource(mytheme.ResMicrophoneIcon)
+	}
+	timeLabel := widget.NewLabel(fmt.Sprintf("%s  %s", item.deviceName, item.timeString))
+	timeLabel.TextStyle.Bold = true
+	status := widget.NewLabel("")
+	status.Importance = widget.LowImportance
+	content := widget.NewLabel(item.content)
+	content.Wrapping = fyne.TextWrapBreak
+	content.Selectable = true
+	row := container.NewVBox(
+		container.NewHBox(icon, timeLabel, layout.NewSpacer(), status),
+		container.NewPadded(content),
+	)
+	result := &transcriptRow{content: content, status: status}
+	result.container = row
+	s.setTranscriptRowStatus(result, item)
+	return result
+}
+
+func (s *speechRTTrans) updateTranscriptRow(index int, item *transcriptItem) {
+	row := s.rows[index]
+	row.content.SetText(item.content)
+	s.setTranscriptRowStatus(row, item)
+}
+
+func (s *speechRTTrans) setTranscriptRowStatus(row *transcriptRow, item *transcriptItem) {
+	if item.final {
+		row.status.SetText("")
+		return
+	}
+	row.status.SetText("识别中")
+}
+
+func transcriptNearBottom(contentHeight, viewportHeight, offsetY float32) bool {
+	return contentHeight-offsetY <= viewportHeight+32
+}
+
+func (s *speechRTTrans) updateTranscriptFollow() {
+	if s.followLatest {
+		s.scroll.ScrollToBottom()
+		s.latestButton.Hide()
+		return
+	}
+	s.latestButton.Show()
 }
 
 func (s *speechRTTrans) setRunError(err error) {
@@ -116,6 +190,24 @@ func (s *speechRTTrans) setRunError(err error) {
 		s.runErr = err
 	}
 	s.runMu.Unlock()
+}
+
+func (s *speechRTTrans) setCaptureError(err error) {
+	if err == nil {
+		return
+	}
+	s.setRunError(err)
+	log.Printf("real-time transcription: %v", err)
+	fyne.Do(func() {
+		if s.status != nil && !s.stopping.Load() {
+			s.status.SetText("识别异常：" + err.Error())
+			s.status.Importance = widget.DangerImportance
+			s.status.Refresh()
+		}
+		if s.pauseButton != nil {
+			s.pauseButton.Disable()
+		}
+	})
 }
 
 func (s *speechRTTrans) runError() error {
@@ -136,108 +228,187 @@ func (s *speechRTTrans) transcriptEntries() []SessionTranscriptEntry {
 	return entries
 }
 
-func (s *speechRTTrans) start(onClosed func(), onPause func(), onResume func()) {
+func (s *speechRTTrans) start(onClosed func(), onPause func() error, onResume func() error) {
 	s.onClosed = onClosed
-	s.window = fyne.CurrentApp().NewWindow("正在聆听")
-	s.window.Resize(fyne.NewSize(1024, 256+128+24))
-	s.list = widget.NewListWithData(s.binding,
-		func() fyne.CanvasObject {
-			timeLabel := widget.NewLabel("")
-			contentEntry := widget.NewMultiLineEntry()
-			contentEntry.Wrapping = fyne.TextWrapBreak
-			contentEntry.TextStyle.Bold = true
-			header := container.NewHBox(widget.NewIcon(mytheme.ResSpeakerIcon), timeLabel)
-			return container.NewVBox(header, contentEntry)
-		},
-		func(dataItem binding.DataItem, object fyne.CanvasObject) {
-			value, err := dataItem.(binding.Untyped).Get()
-			if err != nil {
-				log.Printf("read transcript item: %v", err)
-				return
-			}
-			item := value.(*transcriptItem)
-			row := object.(*fyne.Container)
-			header := row.Objects[0].(*fyne.Container)
-			icon := header.Objects[0].(*widget.Icon)
-			if item.isMicrophone {
-				icon.SetResource(mytheme.ResMicrophoneIcon)
-			} else {
-				icon.SetResource(mytheme.ResSpeakerIcon)
-			}
-			header.Objects[1].(*widget.Label).SetText(fmt.Sprintf("%s %s", item.deviceName, item.timeString))
-			contentEntry := row.Objects[1].(*widget.Entry)
-			contentEntry.SetText(item.content)
-			if item.final {
-				contentEntry.Disable()
-			} else {
-				contentEntry.Enable()
-			}
-		},
-	)
+	s.onPause = onPause
+	s.onResume = onResume
+	s.window = fyne.CurrentApp().NewWindow("实时转写")
+	s.window.Resize(fyne.NewSize(1000, 680))
 
-	endButton := widget.NewButtonWithIcon("停止识别", mytheme.ResEnd, nil)
-	endButton.OnTapped = func() {
-		if s.paused {
-			endButton.SetIcon(mytheme.ResEnd)
-			endButton.SetText("停止识别")
-			s.window.SetTitle("正在聆听")
-			onResume()
-			s.paused = false
-		} else {
-			endButton.SetIcon(mytheme.ResBegin)
-			endButton.SetText("开始识别")
-			s.window.SetTitle("聆听停止")
-			onPause()
-			s.paused = true
-		}
-	}
-
-	microphoneProgress := widget.NewProgressBar()
-	speakerProgress := widget.NewProgressBar()
+	s.status = widget.NewLabel("正在监听")
+	s.status.Importance = widget.SuccessImportance
 	startedAt := s.sessionStartedAt
 	if startedAt.IsZero() {
 		startedAt = time.Now()
 	}
 	s.duration = newSessionDurationView(widget.NewLabel(""), startedAt)
-	controls := container.NewHBox(
-		s.duration.label,
-		microphoneProgress,
-		speakerProgress,
-		endButton,
+	s.pauseButton = widget.NewButton("暂停", s.togglePause)
+	s.stopButton = widget.NewButtonWithIcon("停止并保存", mytheme.ResEnd, s.shutdown)
+	s.latestButton = widget.NewButton("回到最新", func() {
+		s.followLatest = true
+		s.scroll.ScrollToBottom()
+		s.latestButton.Hide()
+	})
+	s.latestButton.Hide()
+
+	toolbar := container.NewHBox(
+		s.status,
 		layout.NewSpacer(),
+		s.duration.label,
+		s.pauseButton,
+		s.stopButton,
 	)
-	s.window.SetContent(container.NewBorder(controls, nil, nil, nil, s.list))
-	s.window.SetCloseIntercept(func() {
-		if !dialog.Message("退出识别吗？").Title("确认窗").YesNo() {
+	s.transcript = container.NewVBox()
+	s.emptyState = widget.NewLabel("等待语音输入…")
+	s.emptyState.Importance = widget.LowImportance
+	s.transcript.Objects = []fyne.CanvasObject{container.NewCenter(s.emptyState)}
+	s.scroll = container.NewVScroll(s.transcript)
+	s.scroll.OnScrolled = func(position fyne.Position) {
+		if s.scroll == nil || s.transcript == nil {
 			return
 		}
-		s.shutdown()
+		s.followLatest = transcriptNearBottom(
+			s.transcript.MinSize().Height,
+			s.scroll.Size().Height,
+			position.Y,
+		)
+		if s.followLatest {
+			s.latestButton.Hide()
+		} else {
+			s.latestButton.Show()
+		}
+	}
+	latestBar := container.NewHBox(layout.NewSpacer(), s.latestButton)
+	s.window.SetContent(container.NewBorder(
+		container.NewPadded(toolbar),
+		container.NewPadded(latestBar),
+		nil, nil,
+		s.scroll,
+	))
+	s.window.SetCloseIntercept(func() {
+		dialog.ShowConfirm("结束实时转写", "结束识别并保存当前转写结果吗？", func(confirm bool) {
+			if confirm {
+				s.shutdown()
+			}
+		}, s.window)
 	})
 	s.window.SetOnClosed(s.release)
-	s.window.Show()
 	s.running.Store(true)
 	activeSpeech.Lock()
 	activeSpeech.window = s
 	activeSpeech.Unlock()
+	s.window.Show()
+}
+
+func (s *speechRTTrans) togglePause() {
+	if !s.running.Load() || s.stopping.Load() || s.transitioning {
+		return
+	}
+	s.transitioning = true
+	s.pauseButton.Disable()
+	pause := !s.paused
+	if pause {
+		s.status.SetText("正在暂停…")
+	} else {
+		s.status.SetText("正在恢复…")
+	}
+	action := s.onPause
+	if !pause {
+		action = s.onResume
+	}
+	go func() {
+		var err error
+		if action != nil {
+			err = action()
+		}
+		fyne.Do(func() {
+			s.transitioning = false
+			if s.stopping.Load() {
+				return
+			}
+			if err != nil {
+				s.setRunError(err)
+				log.Printf("pause/resume real-time transcription: %v", err)
+				s.status.SetText("操作失败；请停止并保存：" + err.Error())
+				s.status.Importance = widget.DangerImportance
+				s.status.Refresh()
+				if s.paused {
+					s.pauseButton.SetText("继续")
+				} else {
+					s.pauseButton.SetText("暂停")
+				}
+				s.pauseButton.Disable()
+				if s.stopRequested {
+					s.stopRequested = false
+					s.shutdown()
+				}
+				return
+			}
+			s.paused = pause
+			if s.paused {
+				s.status.SetText("已暂停")
+				s.pauseButton.SetText("继续")
+				s.duration.Pause()
+			} else {
+				s.status.SetText("正在监听")
+				s.pauseButton.SetText("暂停")
+				s.duration.Resume()
+			}
+			s.status.Importance = widget.SuccessImportance
+			if s.paused {
+				s.status.Importance = widget.WarningImportance
+			}
+			s.status.Refresh()
+			s.pauseButton.Enable()
+			if s.stopRequested {
+				s.stopRequested = false
+				s.shutdown()
+			}
+		})
+	}()
 }
 
 func (s *speechRTTrans) shutdown() {
-	s.shutdownOnce.Do(func() {
-		s.duration.Stop()
-		s.duration = nil
-		if s.onClosed != nil {
-			s.onClosed()
-		}
-	})
-	s.close()
-}
-
-func (s *speechRTTrans) close() {
-	s.running.Store(false)
-	if s.window != nil {
-		s.window.Close()
+	if s.transitioning {
+		s.stopRequested = true
+		s.stopButton.Disable()
+		return
 	}
-	s.release()
+	s.shutdownOnce.Do(func() {
+		s.stopping.Store(true)
+		if s.status != nil {
+			s.status.SetText("正在结束并保存…")
+			s.status.Importance = widget.MediumImportance
+			s.status.Refresh()
+		}
+		if len(s.listItems) == 0 && s.emptyState != nil {
+			s.emptyState.SetText("未识别到语音内容")
+		}
+		if s.pauseButton != nil {
+			s.pauseButton.Disable()
+		}
+		if s.stopButton != nil {
+			s.stopButton.Disable()
+		}
+		if s.duration != nil {
+			s.duration.Stop()
+			s.duration = nil
+		}
+		go func() {
+			if s.onClosed != nil {
+				s.onClosed()
+			}
+			fyne.DoAndWait(func() {
+				s.running.Store(false)
+				if s.window != nil {
+					s.window.Close()
+				} else {
+					s.release()
+				}
+			})
+			close(s.shutdownDone)
+		}()
+	})
 }
 
 func (s *speechRTTrans) release() {
@@ -251,11 +422,13 @@ func (s *speechRTTrans) release() {
 	})
 }
 
-func stopActiveTranscription() {
+func stopActiveTranscription() <-chan struct{} {
 	activeSpeech.Lock()
 	window := activeSpeech.window
 	activeSpeech.Unlock()
 	if window != nil {
 		window.shutdown()
+		return window.shutdownDone
 	}
+	return nil
 }

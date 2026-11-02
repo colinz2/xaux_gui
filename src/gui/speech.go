@@ -54,6 +54,7 @@ func newASRSoundCap(
 	ctx context.Context,
 	proxyAddr, deviceName, savePath string,
 	isMicrophone bool,
+	onError func(error),
 ) (*asrSoundCap, error) {
 	mode := sound_cap.CaptureSpeaker
 	sourceName := "speaker"
@@ -72,6 +73,7 @@ func newASRSoundCap(
 		DeviceName:     deviceName,
 		Mode:           mode,
 		RecordFilePath: savePath,
+		OnError:        onError,
 	}, result.onResult)
 	if err != nil {
 		return nil, fmt.Errorf("create %s capture: %w", sourceName, err)
@@ -94,7 +96,7 @@ func audioFilePath(dir string, isMicrophone bool) string {
 	return filepath.Join(dir, fileName)
 }
 
-func newASRSoundCaps(setting *Setting, session *Session) ([]*asrSoundCap, error) {
+func newASRSoundCaps(setting *Setting, session *Session, onError func(error)) ([]*asrSoundCap, error) {
 	captures := make([]*asrSoundCap, 0, 2)
 	addCapture := func(isMicrophone bool) error {
 		deviceName := setting.speakerName
@@ -106,7 +108,7 @@ func newASRSoundCaps(setting *Setting, session *Session) ([]*asrSoundCap, error)
 			return err
 		}
 		capture, err := newASRSoundCap(
-			context.Background(), setting.proxyAddr, deviceName, path, isMicrophone,
+			context.Background(), setting.proxyAddr, deviceName, path, isMicrophone, onError,
 		)
 		if err != nil {
 			return err
@@ -203,7 +205,7 @@ func startRealTimeTrans(requestedName string) {
 	if err != nil {
 		panic(err)
 	}
-	captures, err = newASRSoundCaps(&setting.Setting, session)
+	captures, err = newASRSoundCaps(&setting.Setting, session, window.setCaptureError)
 	if err != nil {
 		if errors.Is(err, sound_cap.ErrASRProxyUnavailable) {
 			log.Printf("ASR proxy unavailable: %v", err)
@@ -215,7 +217,7 @@ func startRealTimeTrans(requestedName string) {
 		capture.target = window
 		go func(capture *asrSoundCap) {
 			if err := capture.Run(); err != nil {
-				window.setRunError(err)
+				window.setCaptureError(err)
 			}
 		}(capture)
 		if err := <-capture.soundCap.StartDone(); err != nil {
@@ -228,24 +230,33 @@ func startRealTimeTrans(requestedName string) {
 	window.start(
 		func() {
 			stopASRSoundCaps(captures)
+			var transcript []SessionTranscriptEntry
+			fyne.DoAndWait(func() {
+				window.running.Store(false)
+				transcript = window.transcriptEntries()
+			})
 			status := SessionStatusStopped
 			runErr := window.runError()
 			if runErr != nil {
 				status = SessionStatusFailed
 			}
-			if err := session.Finish(status, window.transcriptEntries(), runErr); err != nil {
+			if err := session.Finish(status, transcript, runErr); err != nil {
 				log.Printf("finish transcription session: %v", err)
 			}
 		},
-		func() {
+		func() error {
+			var pauseErr error
 			for _, capture := range captures {
-				capture.soundCap.Pause()
+				pauseErr = errors.Join(pauseErr, capture.soundCap.Pause())
 			}
+			return pauseErr
 		},
-		func() {
+		func() error {
+			var resumeErr error
 			for _, capture := range captures {
-				_ = capture.soundCap.Resume()
+				resumeErr = errors.Join(resumeErr, capture.soundCap.Resume())
 			}
+			return resumeErr
 		},
 	)
 	windowStarted = true

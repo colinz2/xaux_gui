@@ -72,6 +72,22 @@ func TestNewSoundCapRecordingOnly(t *testing.T) {
 	}
 }
 
+func TestPauseRequiresRunningCapture(t *testing.T) {
+	capture, err := NewSoundCap(context.Background(), &Config{Mode: CaptureMicrophone}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.Close()
+
+	if err := capture.Pause(); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("Pause() error = %v, want ErrInvalidState", err)
+	}
+	capture.setState(StatePaused)
+	if err := capture.Pause(); err != nil {
+		t.Fatalf("repeated Pause() on paused capture: %v", err)
+	}
+}
+
 func TestRecordingOnlyWrite(t *testing.T) {
 	recordPath := filepath.Join(t.TempDir(), "recording-only.wav")
 	capture, err := NewSoundCap(context.Background(), &Config{

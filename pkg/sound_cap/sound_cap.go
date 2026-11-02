@@ -320,22 +320,31 @@ func (s *SoundCap) abortStartup(audio *ffaudio.FFAudio) error {
 }
 
 // Pause stops device consumption before ending the current ASR utterance.
-func (s *SoundCap) Pause() {
-	if s.isClose() || !s.transitionState(StateRunning, StatePaused) {
-		return
+func (s *SoundCap) Pause() error {
+	if s.isClose() {
+		return fmt.Errorf("%w: Pause after Close", ErrInvalidState)
+	}
+	if !s.transitionState(StateRunning, StatePaused) {
+		if s.State() == StatePaused {
+			return nil
+		}
+		return fmt.Errorf("%w: Pause from %d", ErrInvalidState, s.State())
 	}
 	audio := s.getAudio()
 	if audio == nil {
-		return
+		err := fmt.Errorf("%w: audio stream is unavailable", ErrInvalidState)
+		s.setState(StateError)
+		s.close()
+		return err
 	}
 	if err := audio.Pause(); err != nil {
 		s.setState(StateError)
 		s.reportError(err)
 		s.close()
-		return
+		return err
 	}
 	if s.isClose() {
-		return
+		return fmt.Errorf("%w: Pause after Close", ErrInvalidState)
 	}
 
 	s.ioMu.Lock()
@@ -346,12 +355,15 @@ func (s *SoundCap) Pause() {
 	s.ioMu.Unlock()
 	if err != nil {
 		if s.isClose() {
-			return
+			return err
 		}
 		s.setState(StateError)
-		s.reportError(fmt.Errorf("pause ASR session: %w", err))
+		err = fmt.Errorf("pause ASR session: %w", err)
+		s.reportError(err)
 		s.close()
+		return err
 	}
+	return nil
 }
 
 // Resume starts a new ASR utterance before restarting device consumption.

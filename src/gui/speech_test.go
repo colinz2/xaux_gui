@@ -4,9 +4,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
+	"time"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/data/binding"
+	"fyne.io/fyne/v2/container"
 	fynetest "fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 	"github.com/realzhangm/xaux/pkg/x"
@@ -34,12 +35,12 @@ func TestSpeechRTTransApplyASRResult(t *testing.T) {
 	app := fynetest.NewApp()
 	defer app.Quit()
 
-	speech := &speechRTTrans{binding: binding.NewUntypedList()}
-	speech.list = widget.NewList(
-		func() int { return len(speech.listItems) },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
-		func(widget.ListItemID, fyne.CanvasObject) {},
-	)
+	speech := &speechRTTrans{
+		transcript:   container.NewVBox(),
+		latestButton: widget.NewButton("回到最新", nil),
+		followLatest: true,
+	}
+	speech.scroll = container.NewVScroll(speech.transcript)
 	speech.running.Store(true)
 	capture := &asrSoundCap{resultIndex: -1, writeListIndex: -1}
 
@@ -49,6 +50,9 @@ func TestSpeechRTTransApplyASRResult(t *testing.T) {
 	})
 	if len(speech.listItems) != 1 || speech.listItems[0].content != "partial" {
 		t.Fatalf("first zero-index result was not appended: %+v", speech.listItems)
+	}
+	if speech.rows[0].content.Wrapping != fyne.TextWrapBreak || speech.rows[0].status.Text != "识别中" {
+		t.Fatalf("partial result was not rendered as a wrapped interim row: %+v", speech.rows[0])
 	}
 
 	speech.applyASRResult(capture, &x.AllResponse{
@@ -72,15 +76,109 @@ func TestSpeechRTTransApplyASRResult(t *testing.T) {
 	}
 }
 
+func TestSpeechRTTransKeepsConcurrentSourcesIndependent(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+
+	speech := &speechRTTrans{
+		transcript:   container.NewVBox(),
+		latestButton: widget.NewButton("回到最新", nil),
+		followLatest: true,
+	}
+	speech.scroll = container.NewVScroll(speech.transcript)
+	speech.running.Store(true)
+	speaker := &asrSoundCap{
+		deviceName:     "扬声器",
+		resultIndex:    -1,
+		writeListIndex: -1,
+	}
+	microphone := &asrSoundCap{
+		deviceName:     "麦克风",
+		isMicrophone:   true,
+		resultIndex:    -1,
+		writeListIndex: -1,
+	}
+
+	speech.applyASRResult(speaker, &x.AllResponse{
+		Type:   x.TypeRecognizing,
+		Result: x.RecognizeResult{Index: 0, Result: "扬声器未完成", Interim: true},
+	})
+	speech.applyASRResult(microphone, &x.AllResponse{
+		Type:   x.TypeRecognizing,
+		Result: x.RecognizeResult{Index: 0, Result: "麦克风识别中", Interim: true},
+	})
+	speech.applyASRResult(microphone, &x.AllResponse{
+		Type:   x.TypeSentenceEnd,
+		Result: x.RecognizeResult{Index: 0, Result: "麦克风已完成"},
+	})
+
+	if len(speech.listItems) != 2 {
+		t.Fatalf("interleaved streams produced %d rows, want 2", len(speech.listItems))
+	}
+	if item := speech.listItems[speaker.writeListIndex]; item.content != "扬声器未完成" || item.final {
+		t.Fatalf("microphone finalization changed speaker interim row: %+v", item)
+	}
+	if item := speech.listItems[microphone.writeListIndex]; item.content != "麦克风已完成" || !item.final {
+		t.Fatalf("microphone row was not finalized in place: %+v", item)
+	}
+	if speech.rows[speaker.writeListIndex].status.Text != "识别中" ||
+		speech.rows[microphone.writeListIndex].status.Text != "" {
+		t.Fatalf("unexpected independent row states: speaker=%q microphone=%q",
+			speech.rows[speaker.writeListIndex].status.Text,
+			speech.rows[microphone.writeListIndex].status.Text)
+	}
+
+	speech.applyASRResult(speaker, &x.AllResponse{
+		Type:   x.TypeSentenceEnd,
+		Result: x.RecognizeResult{Index: 0, Result: "扬声器已完成"},
+	})
+	if item := speech.listItems[speaker.writeListIndex]; item.content != "扬声器已完成" || !item.final {
+		t.Fatalf("speaker row was not finalized in place: %+v", item)
+	}
+	if speech.listItems[0].deviceName != "扬声器" || speech.listItems[1].deviceName != "麦克风" {
+		t.Fatalf("rows moved while the streams finalized: %+v", speech.listItems)
+	}
+}
+
+func TestTranscriptNearBottom(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    float32
+		viewport   float32
+		offset     float32
+		wantFollow bool
+	}{
+		{name: "short content", content: 200, viewport: 400, wantFollow: true},
+		{name: "at bottom", content: 800, viewport: 400, offset: 400, wantFollow: true},
+		{name: "near bottom", content: 800, viewport: 400, offset: 370, wantFollow: true},
+		{name: "reading earlier text", content: 800, viewport: 400, offset: 200, wantFollow: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := transcriptNearBottom(test.content, test.viewport, test.offset); got != test.wantFollow {
+				t.Fatalf("transcriptNearBottom() = %v, want %v", got, test.wantFollow)
+			}
+		})
+	}
+}
+
 func TestSpeechShutdownOnce(t *testing.T) {
 	speechWindowOpen.Store(false)
 	window := newSpeechRTTrans()
-	calls := 0
-	window.onClosed = func() { calls++ }
+	calls := make(chan struct{}, 2)
+	window.onClosed = func() { calls <- struct{}{} }
 	window.shutdown()
 	window.shutdown()
-	if calls != 1 {
-		t.Fatalf("shutdown callback ran %d times, want 1", calls)
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown callback did not run")
+	}
+	window.release()
+	select {
+	case <-calls:
+		t.Fatal("shutdown callback ran more than once")
+	case <-time.After(20 * time.Millisecond):
 	}
 	if next := newSpeechRTTrans(); next == nil {
 		t.Fatal("shutdown did not release the transcription window")
