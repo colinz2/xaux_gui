@@ -168,10 +168,14 @@ func TestInterviewSetupHasNameAndJobDescription(t *testing.T) {
 	}
 	defer closeInterviewSetup()
 	var entries []*widget.Entry
+	var interimCheck *widget.Check
 	var visit func(fyne.CanvasObject)
 	visit = func(object fyne.CanvasObject) {
 		if entry, ok := object.(*widget.Entry); ok {
 			entries = append(entries, entry)
+		}
+		if check, ok := object.(*widget.Check); ok {
+			interimCheck = check
 		}
 		if group, ok := object.(*fyne.Container); ok {
 			for _, child := range group.Objects {
@@ -182,6 +186,13 @@ func TestInterviewSetupHasNameAndJobDescription(t *testing.T) {
 	visit(window.Content())
 	if len(entries) != 2 || entries[0].MultiLine == entries[1].MultiLine {
 		t.Fatalf("setup should contain title and multiline job description, got %d entries", len(entries))
+	}
+	if interimCheck == nil || !interimCheck.Checked {
+		t.Fatal("interim prediction should be enabled by default")
+	}
+	fynetest.Tap(interimCheck)
+	if app.Preferences().BoolWithFallback(interviewInterimPreference, true) {
+		t.Fatal("interim prediction preference was not saved")
 	}
 	closeInterviewSetup()
 	activeInterview.Lock()

@@ -20,7 +20,11 @@ type sequenceQuestionCheckModel struct {
 	blocked chan struct{}
 }
 
-func (m *sequenceQuestionCheckModel) streamAnswer(ctx context.Context, _ []interviewChatMessage, _ func(), onToken func(string)) error {
+func (m *sequenceQuestionCheckModel) streamAnswer(ctx context.Context, messages []interviewChatMessage, _ func(), onToken func(string)) error {
+	if !strings.HasPrefix(messages[0].content, "判断当前面试官发言") {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	m.calls++
 	switch m.calls {
 	case 1:

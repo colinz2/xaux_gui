@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -49,28 +50,38 @@ type interviewAnswer struct {
 }
 
 type interviewQuestion struct {
-	messages   []interviewChatMessage
-	answer     *interviewAnswer
-	queuedAt   time.Time
-	generation uint64
+	messages    []interviewChatMessage
+	answer      *interviewAnswer
+	speculative *interviewSpeculativeAnswer
+	turnIndex   int
+	finalAt     time.Time
+	queuedAt    time.Time
+	generation  uint64
 }
 
 type interviewQuestionCheck struct {
-	turnIndex int
-	messages  []interviewChatMessage
+	turnIndex      int
+	messages       []interviewChatMessage
+	answerMessages []interviewChatMessage
+	preview        *interviewInterimPreview
+	queuedAt       time.Time
+	finalAt        time.Time
 }
 
 type interviewAssistant struct {
-	window       fyne.Window
-	session      *Session
-	modelConfig  modelConfig
-	model        interviewAnswerModel
-	reference    interviewContext
-	captures     []*asrSoundCap
-	turns        []interviewTurn
-	rows         []*interviewTranscriptRow
-	answers      []*interviewAnswer
-	savedEntries []SessionTranscriptEntry
+	window         fyne.Window
+	session        *Session
+	modelConfig    modelConfig
+	model          interviewAnswerModel
+	traceSession   uint64
+	reference      interviewContext
+	captures       []*asrSoundCap
+	turns          []interviewTurn
+	rows           []*interviewTranscriptRow
+	answers        []*interviewAnswer
+	savedEntries   []SessionTranscriptEntry
+	interimEnabled bool
+	interimStates  map[int]*interviewInterimState
 
 	status           *widget.Label
 	duration         *sessionDurationView
@@ -153,10 +164,19 @@ func showInterviewSetup() {
 	information := widget.NewLabel("")
 	bindings.setLabel(information, "interview.job_info", nil)
 	information.Wrapping = fyne.TextWrapBreak
+	preferences := fyne.CurrentApp().Preferences()
+	preview := widget.NewCheck("", func(enabled bool) {
+		preferences.SetBool(interviewInterimPreference, enabled)
+	})
+	preview.SetChecked(preferences.BoolWithFallback(interviewInterimPreference, true))
+	bindings.add(func() { preview.SetText(tr("interview.interim_enable")) })
+	previewInfo := widget.NewLabel("")
+	bindings.setLabel(previewInfo, "interview.interim_info", nil)
+	previewInfo.Wrapping = fyne.TextWrapBreak
 	cancel := widget.NewButton("", window.Close)
 	bindings.setButton(cancel, "common.cancel", nil)
 	start := widget.NewButton("", func() {
-		if err := startInterviewAssistant(nameEntry.Text, jobEntry.Text); err != nil {
+		if err := startInterviewAssistant(nameEntry.Text, jobEntry.Text, preview.Checked); err != nil {
 			showLocalizedError(err, window)
 			return
 		}
@@ -168,11 +188,11 @@ func showInterviewSetup() {
 	bindings.setLabel(jobLabel, "interview.job_label", nil)
 	content := container.NewPadded(container.NewBorder(
 		container.NewVBox(nameLabel, nameEntry, jobLabel),
-		container.NewVBox(information, container.NewHBox(layout.NewSpacer(), cancel, start)),
+		container.NewVBox(information, preview, previewInfo, container.NewHBox(layout.NewSpacer(), cancel, start)),
 		nil, nil, jobEntry,
 	))
 	window.SetContent(content)
-	window.Resize(fyne.NewSize(640, 430))
+	window.Resize(fyne.NewSize(640, 500))
 	window.CenterOnScreen()
 	activeInterview.Lock()
 	activeInterview.setup = window
@@ -198,7 +218,7 @@ func closeInterviewSetup() {
 	}
 }
 
-func startInterviewAssistant(requestedName, jobDescription string) error {
+func startInterviewAssistant(requestedName, jobDescription string, interimEnabled bool) error {
 	jobDescription, err := validateInterviewContext(jobDescription, &localizedText{key: "reference.job"})
 	if err != nil {
 		return err
@@ -243,11 +263,12 @@ func startInterviewAssistant(requestedName, jobDescription string) error {
 		return errors.New(trData("interview.active_task", map[string]any{"Task": voiceTaskDisplayName(activeVoiceTask())}))
 	}
 	assistant.reference = interviewContext{jobDescription: jobDescription, resume: resume, knowledge: knowledge}
+	assistant.interimEnabled = interimEnabled
 	assistant.debugLog = debugLogger
 	assistant.debugLogFile = debugLogFile
 	debugLogger.Printf(
-		"session starting model=%q reasoning_effort=%q max_tokens=%d log_file=%q",
-		model.model, reasoningEffortForModel(model.model), maxTokensForModel(model.model), debugLogFile.Name(),
+		"session starting session=%d model=%q interim_enabled=%t reasoning_effort=%q max_tokens=%d log_file=%q",
+		assistant.traceSession, model.model, interimEnabled, reasoningEffortForModel(model.model), maxTokensForModel(model.model), debugLogFile.Name(),
 	)
 
 	session, err := CreateSession(setting.sessionRootDir, requestedName, SessionKindInterview)
@@ -263,19 +284,29 @@ func startInterviewAssistant(requestedName, jobDescription string) error {
 		return err
 	}
 	assistant.session = session
+	setupStarted := time.Now()
+	assistant.debugf("asr setup starting session=%d", assistant.traceSession)
 	captures, err := newASRSoundCaps(&setting.Setting, session, assistant.setCaptureError)
 	if err != nil {
+		assistant.debugf("asr setup failed session=%d duration_ms=%d error=%s", assistant.traceSession, time.Since(setupStarted).Milliseconds(), diagnosticError(err))
 		if finishErr := session.Finish(SessionStatusFailed, nil, err); finishErr != nil {
 			err = errors.Join(err, finishErr)
 		}
 		assistant.release()
 		return err
 	}
+	assistant.debugf("asr setup ready session=%d captures=%d duration_ms=%d", assistant.traceSession, len(captures), time.Since(setupStarted).Milliseconds())
 	assistant.captures = captures
 	assistant.buildContent()
 	assistant.running.Store(true)
 
 	for _, capture := range captures {
+		startedAt := time.Now()
+		source := "speaker"
+		if capture.isMicrophone {
+			source = "microphone"
+		}
+		assistant.debugf("audio capture starting session=%d source=%s", assistant.traceSession, source)
 		capture.target = assistant
 		assistant.captureWG.Add(1)
 		go func(capture *asrSoundCap) {
@@ -285,6 +316,7 @@ func startInterviewAssistant(requestedName, jobDescription string) error {
 			}
 		}(capture)
 		if err := <-capture.soundCap.StartDone(); err != nil {
+			assistant.debugf("audio capture startup failed session=%d source=%s duration_ms=%d error=%s", assistant.traceSession, source, time.Since(startedAt).Milliseconds(), diagnosticError(err))
 			go assistant.failStartup(localizedMessageError(
 				"interview.source_start_failed", map[string]any{"Name": fmt.Sprintf("%q", capture.deviceName)},
 				fmt.Sprintf("start audio source %q failed", capture.deviceName),
@@ -292,6 +324,7 @@ func startInterviewAssistant(requestedName, jobDescription string) error {
 			))
 			return nil
 		}
+		assistant.debugf("audio capture ready session=%d source=%s duration_ms=%d", assistant.traceSession, source, time.Since(startedAt).Milliseconds())
 	}
 
 	assistant.startAnswerWorker()
@@ -309,6 +342,7 @@ func newInterviewAssistant(model interviewAnswerModel, config modelConfig) *inte
 	return &interviewAssistant{
 		modelConfig:   config,
 		model:         model,
+		traceSession:  interviewSessionSequence.Add(1),
 		ctx:           ctx,
 		cancel:        cancel,
 		questionQueue: make(chan interviewQuestion, 1),
@@ -348,6 +382,7 @@ func (s *interviewAssistant) buildContent() {
 	s.emptyAnswers.Importance = widget.LowImportance
 	s.answerList = container.NewVBox(container.NewCenter(s.emptyAnswers))
 	s.answerScroll = container.NewVScroll(s.answerList)
+	s.locale.add(s.refreshInterimLocale)
 
 	transcriptHeader := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	answerHeader := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
@@ -379,8 +414,11 @@ func (s *interviewAssistant) updateASRResult(capture *asrSoundCap, response *x.A
 	}
 	if response.Type == x.TypeSentenceStart {
 		_, interval := capture.acceptASRResult(response)
-		s.debugf("asr event source=%s type=%s interval_ms=%d", source, response.Type, interval.Milliseconds())
+		s.debugf("asr event session=%d source=%s type=%s interval_ms=%d", s.traceSession, source, response.Type, interval.Milliseconds())
 		fyne.Do(func() {
+			if capture.writeListIndex >= 0 && capture.writeListIndex < len(s.turns) && !s.turns[capture.writeListIndex].final {
+				s.discardInterimState(capture.writeListIndex)
+			}
 			capture.resultIndex = -1
 			capture.writeListIndex = -1
 		})
@@ -392,21 +430,25 @@ func (s *interviewAssistant) updateASRResult(capture *asrSoundCap, response *x.A
 	receivedAt := time.Now()
 	accepted, interval := capture.acceptASRResult(response)
 	s.debugf(
-		"asr event source=%s type=%s interim=%t index=%d text_chars=%d interval_ms=%d accepted=%t",
-		source, response.Type, response.Result.Interim, response.Result.Index,
+		"asr event session=%d source=%s type=%s interim=%t index=%d text_chars=%d interval_ms=%d accepted=%t",
+		s.traceSession, source, response.Type, response.Result.Interim, response.Result.Index,
 		utf8.RuneCountInString(response.Result.Result), interval.Milliseconds(), accepted,
 	)
 	if !accepted {
 		return
 	}
 	fyne.Do(func() {
-		s.debugf("asr ui update source=%s type=%s queue_ms=%d",
-			source, response.Type, time.Since(receivedAt).Milliseconds())
-		s.applyASRResult(capture, response)
+		s.debugf("asr ui update session=%d source=%s type=%s index=%d queue_ms=%d",
+			s.traceSession, source, response.Type, response.Result.Index, time.Since(receivedAt).Milliseconds())
+		s.applyASRResultAt(capture, response, receivedAt)
 	})
 }
 
 func (s *interviewAssistant) applyASRResult(capture *asrSoundCap, response *x.AllResponse) {
+	s.applyASRResultAt(capture, response, time.Now())
+}
+
+func (s *interviewAssistant) applyASRResultAt(capture *asrSoundCap, response *x.AllResponse, receivedAt time.Time) {
 	if !s.running.Load() || s.transcript == nil {
 		return
 	}
@@ -454,6 +496,17 @@ func (s *interviewAssistant) applyASRResult(capture *asrSoundCap, response *x.Al
 	}
 	capture.resultIndex = resultIndex
 	turn := &s.turns[index]
+	if isFinal && newlyFinal {
+		turn.finalReceivedAt = receivedAt
+	} else if !isFinal {
+		if turn.firstInterimAt.IsZero() {
+			turn.firstInterimAt = receivedAt
+		}
+		turn.lastInterimAt = receivedAt
+	}
+	s.debugf("asr applied session=%d turn=%d source_microphone=%t index=%d final=%t newly_final=%t first_interim_to_final_ms=%d last_interim_to_final_ms=%d",
+		s.traceSession, index, capture.isMicrophone, resultIndex, isFinal, newlyFinal,
+		elapsedMillis(turn.firstInterimAt, turn.finalReceivedAt), elapsedMillis(turn.lastInterimAt, turn.finalReceivedAt))
 	if newlyFinal {
 		s.savedEntries = append(s.savedEntries, SessionTranscriptEntry{
 			Timestamp: turn.timestamp,
@@ -462,7 +515,11 @@ func (s *interviewAssistant) applyASRResult(capture *asrSoundCap, response *x.Al
 		})
 		if !turn.isMicrophone && strings.TrimSpace(turn.content) != "" && !s.stopping.Load() {
 			s.queueQuestionCheck(index)
+		} else {
+			s.discardInterimState(index)
 		}
+	} else if !isFinal && !turn.isMicrophone && s.interimEnabled && !s.stopping.Load() {
+		s.observeInterim(index)
 	}
 	s.transcript.Refresh()
 	s.transcriptScroll.ScrollToBottom()
@@ -513,44 +570,61 @@ func (s *interviewAssistant) setTranscriptRowStatus(row *interviewTranscriptRow,
 }
 
 func (s *interviewAssistant) queueQuestionCheck(index int) {
+	buildStarted := time.Now()
 	row := s.rows[index]
 	s.locale.setLabel(row.status, "interview.checking", nil)
 	check := interviewQuestionCheck{
-		turnIndex: index,
-		messages:  buildInterviewQuestionMessages(s.turns[:index+1]),
+		turnIndex:      index,
+		messages:       buildInterviewQuestionMessages(s.turns[:index+1]),
+		answerMessages: buildInterviewMessages(s.turns[:index+1], s.modelConfig.SystemPrompt, s.reference),
+		finalAt:        s.turns[index].finalReceivedAt,
 	}
+	check.preview = s.finalizeInterim(index)
+	check.queuedAt = time.Now()
 	select {
 	case s.checkQueue <- check:
+		s.debugf("question check queued session=%d turn=%d queue_depth=%d build_ms=%d final_to_queue_ms=%d",
+			s.traceSession, index, len(s.checkQueue), check.queuedAt.Sub(buildStarted).Milliseconds(), elapsedMillis(check.finalAt, check.queuedAt))
 	default:
+		s.discardInterimState(index)
 		s.locale.setLabel(row.status, "interview.check_queue_full", nil)
 		row.generate.Show()
 		s.setStatus("interview.check_queue_full_help", nil, widget.WarningImportance)
-		s.debugf("question check rejected reason=queue_full")
+		s.debugf("question check rejected session=%d turn=%d reason=queue_full", s.traceSession, index)
 	}
 }
 
 func (s *interviewAssistant) applyQuestionDecision(index int, decision interviewQuestionDecision, err error) {
+	s.applyQuestionDecisionWithAnswer(index, decision, err, nil, nil)
+}
+
+func (s *interviewAssistant) applyQuestionDecisionWithAnswer(index int, decision interviewQuestionDecision, err error, speculative *interviewSpeculativeAnswer, preview *interviewInterimPreview) bool {
 	row := s.rows[index]
 	switch {
 	case err != nil:
+		s.removeInterimPreview(index, true)
 		s.locale.setLabel(row.status, "interview.check_failed", nil)
 		row.generate.Show()
 		s.setStatus("interview.check_error", map[string]any{"Error": err}, widget.DangerImportance)
 	case decision == interviewQuestionYes:
 		if s.hasAnswerTurn && index < s.latestAnswerTurn {
+			s.removeInterimPreview(index, true)
 			s.locale.setLabel(row.status, "interview.older_question", nil)
 			row.generate.Show()
-			return
+			return false
 		}
 		s.locale.clearLabel(row.status)
-		s.enqueueQuestion(index)
+		return s.enqueueQuestionWithAnswer(index, speculative, preview)
 	case decision == interviewQuestionNo:
+		s.removeInterimPreview(index, true)
 		s.locale.setLabel(row.status, "interview.not_question", nil)
 		row.generate.Show()
 	default:
+		s.removeInterimPreview(index, true)
 		s.locale.setLabel(row.status, "interview.unknown", nil)
 		row.generate.Show()
 	}
+	return false
 }
 
 func (s *interviewAssistant) startQuestionCheckWorker() {
@@ -562,10 +636,17 @@ func (s *interviewAssistant) startQuestionCheckWorker() {
 			case <-s.ctx.Done():
 				return
 			case check := <-s.checkQueue:
+				startedAt := time.Now()
+				s.debugf("question check and speculative answer started session=%d turn=%d queue_ms=%d final_to_start_ms=%d",
+					s.traceSession, check.turnIndex, elapsedMillis(check.queuedAt, startedAt), elapsedMillis(check.finalAt, startedAt))
+				speculative := s.startSpeculativeAnswerForTurn(check.answerMessages, check.turnIndex)
 				ctx, cancel := context.WithTimeout(s.ctx, interviewQuestionTimeout)
+				ctx = withInterviewRequestTrace(ctx, interviewRequestTrace{session: s.traceSession, turn: check.turnIndex, kind: "classification"})
 				decision, err := classifyInterviewTurn(ctx, s.model, check.messages)
+				classifiedAt := time.Now()
 				cancel()
 				if s.ctx.Err() != nil {
+					speculative.cancel()
 					return
 				}
 				if errors.Is(err, context.DeadlineExceeded) {
@@ -574,28 +655,44 @@ func (s *interviewAssistant) startQuestionCheckWorker() {
 						fmt.Sprintf("question classification timed out after %s", interviewQuestionTimeout), nil,
 					)
 				}
-				s.debugf("question check completed decision=%d error=%s", decision, diagnosticError(err))
+				s.debugf("question check completed session=%d turn=%d decision=%d duration_ms=%d final_to_decision_ms=%d error=%s",
+					s.traceSession, check.turnIndex, decision, classifiedAt.Sub(startedAt).Milliseconds(), elapsedMillis(check.finalAt, classifiedAt), diagnosticError(err))
+				adopted := false
 				fyne.DoAndWait(func() {
+					s.debugf("question decision ui session=%d turn=%d decision=%d queue_ms=%d", s.traceSession, check.turnIndex, decision, time.Since(classifiedAt).Milliseconds())
 					if !s.stopping.Load() {
-						s.applyQuestionDecision(check.turnIndex, decision, err)
+						adopted = s.applyQuestionDecisionWithAnswer(check.turnIndex, decision, err, speculative, check.preview)
 					}
 				})
+				if !adopted {
+					s.debugf("speculative answer discarded session=%d turn=%d", s.traceSession, check.turnIndex)
+					speculative.cancel()
+				}
 			}
 		}
 	}()
 }
 
 func (s *interviewAssistant) enqueueQuestion(turnIndex int) {
+	s.enqueueQuestionWithAnswer(turnIndex, nil, nil)
+}
+
+func (s *interviewAssistant) enqueueQuestionWithAnswer(turnIndex int, speculative *interviewSpeculativeAnswer, preview *interviewInterimPreview) bool {
 	if turnIndex < 0 || turnIndex >= len(s.turns) {
-		return
+		return false
 	}
 	turn := s.turns[turnIndex]
 	if turn.isMicrophone || !turn.final {
-		return
+		return false
 	}
 	if !s.hasAnswerTurn || turnIndex > s.latestAnswerTurn {
 		s.latestAnswerTurn = turnIndex
 		s.hasAnswerTurn = true
+	}
+	for index := range s.interimStates {
+		if index < turnIndex {
+			s.discardInterimState(index)
+		}
 	}
 	answer := &interviewAnswer{
 		sequence:  len(s.answers) + 1,
@@ -616,46 +713,59 @@ func (s *interviewAssistant) enqueueQuestion(turnIndex int) {
 	questionLabel.Selectable = true
 	hintLabel := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	s.locale.setLabel(hintLabel, "interview.hint", nil)
-	header := container.NewHBox(
-		hintLabel,
-		layout.NewSpacer(),
-		answer.status,
-	)
+	header := container.NewHBox(hintLabel, layout.NewSpacer(), answer.status)
 	card := widget.NewCard(
 		tr("interview.question"),
 		turn.timestamp,
 		container.NewVBox(questionLabel, widget.NewSeparator(), header, answer.answer, answer.error),
 	)
 	s.locale.add(func() { card.SetTitle(tr("interview.question")) })
-	if len(s.answers) == 0 {
-		s.answerList.Objects = nil
-	} else {
-		s.answerList.Objects = append(s.answerList.Objects, widget.NewSeparator())
+	previewPosition := -1
+	if preview != nil {
+		previewPosition = slices.Index(s.answerList.Objects, fyne.CanvasObject(preview.container))
 	}
-	s.answerList.Objects = append(s.answerList.Objects, card)
+	if previewPosition >= 0 && s.retainInterimPreview(turnIndex, preview) {
+		s.answerList.Objects = slices.Insert(s.answerList.Objects, previewPosition+1, fyne.CanvasObject(widget.NewSeparator()), fyne.CanvasObject(card))
+	} else {
+		if preview != nil && previewPosition < 0 {
+			s.debugf("interim answer missing from list session=%d turn=%d", s.traceSession, turnIndex)
+			s.discardInterimState(turnIndex)
+		}
+		if len(s.answers) == 0 && !s.hasVisibleInterimPreview() {
+			s.answerList.Objects = nil
+		} else if len(s.answerList.Objects) > 0 {
+			s.answerList.Objects = append(s.answerList.Objects, widget.NewSeparator())
+		}
+		s.answerList.Objects = append(s.answerList.Objects, card)
+	}
 	s.answers = append(s.answers, answer)
 	s.answerList.Refresh()
 	s.answerScroll.ScrollToBottom()
 
 	messages := buildInterviewMessages(s.turns[:turnIndex+1], s.modelConfig.SystemPrompt, s.reference)
 	question := interviewQuestion{
-		messages: messages,
-		answer:   answer,
-		queuedAt: time.Now(),
+		messages:    messages,
+		answer:      answer,
+		speculative: speculative,
+		turnIndex:   turnIndex,
+		finalAt:     turn.finalReceivedAt,
+		queuedAt:    time.Now(),
 	}
 	question.generation = s.answerVersion.Add(1)
 	s.cancelActiveAnswer()
 	s.supersedeQueuedAnswers()
 	s.debugf(
-		"question queued id=%d context_messages=%d question_chars=%d queue_depth=%d",
-		answer.sequence, len(messages), len([]rune(turn.content)), len(s.questionQueue),
+		"question queued session=%d turn=%d id=%d speculative=%t context_messages=%d question_chars=%d queue_depth=%d final_to_queue_ms=%d",
+		s.traceSession, turnIndex, answer.sequence, speculative != nil, len(messages), len([]rune(turn.content)), len(s.questionQueue), elapsedMillis(turn.finalReceivedAt, question.queuedAt),
 	)
 	select {
 	case s.questionQueue <- question:
+		return true
 	default:
 		s.locale.setLabel(answer.status, "interview.queue_full", nil)
 		s.locale.setLabel(answer.error, "interview.queue_full_help", nil)
-		s.debugf("question rejected id=%d reason=queue_full", answer.sequence)
+		s.debugf("question rejected session=%d turn=%d id=%d reason=queue_full", s.traceSession, turnIndex, answer.sequence)
+		return false
 	}
 }
 
@@ -663,6 +773,7 @@ func (s *interviewAssistant) cancelActiveAnswer() {
 	s.answerMu.Lock()
 	defer s.answerMu.Unlock()
 	if s.activeAnswer != nil && s.answerCancel != nil {
+		s.debugf("active answer canceled session=%d id=%d reason=superseded", s.traceSession, s.activeAnswer.sequence)
 		s.activeAnswer.superseded.Store(true)
 		s.answerCancel()
 	}
@@ -672,6 +783,10 @@ func (s *interviewAssistant) supersedeQueuedAnswers() {
 	for {
 		select {
 		case question := <-s.questionQueue:
+			s.debugf("queued answer canceled session=%d turn=%d id=%d reason=superseded", s.traceSession, question.turnIndex, question.answer.sequence)
+			if question.speculative != nil {
+				question.speculative.cancel()
+			}
 			s.markAnswerSuperseded(question.answer)
 		default:
 			return
@@ -732,8 +847,9 @@ func (s *interviewAssistant) startAnswerWorker() {
 				}
 				startedAt := time.Now()
 				s.debugf(
-					"answer worker started id=%d queue_wait=%s",
-					question.answer.sequence, startedAt.Sub(question.queuedAt).Round(time.Millisecond),
+					"answer worker started session=%d turn=%d id=%d speculative=%t queue_ms=%d final_to_start_ms=%d",
+					s.traceSession, question.turnIndex, question.answer.sequence, question.speculative != nil,
+					elapsedMillis(question.queuedAt, startedAt), elapsedMillis(question.finalAt, startedAt),
 				)
 				fyne.DoAndWait(func() {
 					if !s.stopping.Load() {
@@ -743,8 +859,12 @@ func (s *interviewAssistant) startAnswerWorker() {
 					}
 				})
 				requestCtx, cancel := context.WithTimeout(s.ctx, interviewAnswerTimeout)
+				requestCtx = withInterviewRequestTrace(requestCtx, interviewRequestTrace{session: s.traceSession, turn: question.turnIndex, kind: "manual_answer"})
 				if !s.beginAnswer(question, cancel) {
 					cancel()
+					if question.speculative != nil {
+						question.speculative.cancel()
+					}
 					fyne.DoAndWait(func() {
 						s.markAnswerSuperseded(question.answer)
 					})
@@ -752,9 +872,14 @@ func (s *interviewAssistant) startAnswerWorker() {
 				}
 				firstToken := true
 				answerChars := 0
-				err := s.model.streamAnswer(requestCtx, question.messages, func() {
+				answerChunks := 0
+				stream := s.model.streamAnswer
+				if question.speculative != nil {
+					stream = question.speculative.streamAnswer
+				}
+				err := stream(requestCtx, question.messages, func() {
 					fyne.Do(func() {
-						if s.stopping.Load() {
+						if s.stopping.Load() || question.answer.superseded.Load() {
 							return
 						}
 						s.locale.setLabel(question.answer.status, "interview.thinking", nil)
@@ -763,11 +888,15 @@ func (s *interviewAssistant) startAnswerWorker() {
 						s.setStatus("interview.model_thinking", nil, widget.SuccessImportance)
 					})
 				}, func(token string) {
+					emittedAt := time.Now()
 					isFirstToken := firstToken
 					firstToken = false
+					answerChunks++
+					chunk := answerChunks
 					answerChars += len([]rune(token))
 					fyne.Do(func() {
-						if s.stopping.Load() {
+						if s.stopping.Load() || question.answer.superseded.Load() {
+							s.debugf("answer ui chunk dropped session=%d turn=%d id=%d chunk=%d", s.traceSession, question.turnIndex, question.answer.sequence, chunk)
 							return
 						}
 						if isFirstToken {
@@ -780,9 +909,16 @@ func (s *interviewAssistant) startAnswerWorker() {
 						question.answer.content += token
 						question.answer.answer.SetText(question.answer.content)
 						s.answerScroll.ScrollToBottom()
+						appliedAt := time.Now()
+						s.debugf("answer ui chunk applied session=%d turn=%d id=%d chunk=%d first=%t chars=%d ui_queue_ms=%d final_to_ui_ms=%d",
+							s.traceSession, question.turnIndex, question.answer.sequence, chunk, isFirstToken, len([]rune(token)),
+							elapsedMillis(emittedAt, appliedAt), elapsedMillis(question.finalAt, appliedAt))
 					})
 				})
 				cancel()
+				if question.speculative != nil {
+					question.speculative.cancel()
+				}
 				s.finishAnswer(question.answer)
 				if errors.Is(err, context.DeadlineExceeded) {
 					err = localizedMessageError(
@@ -791,8 +927,8 @@ func (s *interviewAssistant) startAnswerWorker() {
 					)
 				}
 				s.debugf(
-					"answer worker finished id=%d duration=%s answer_chars=%d error=%v",
-					question.answer.sequence, time.Since(startedAt).Round(time.Millisecond), answerChars, diagnosticError(err),
+					"answer worker finished session=%d turn=%d id=%d duration=%s answer_chars=%d answer_chunks=%d error=%v",
+					s.traceSession, question.turnIndex, question.answer.sequence, time.Since(startedAt).Round(time.Millisecond), answerChars, answerChunks, diagnosticError(err),
 				)
 				fyne.DoAndWait(func() {
 					if s.stopping.Load() {
@@ -968,7 +1104,7 @@ func (s *interviewAssistant) shutdown() {
 		return
 	}
 	s.shutdownOnce.Do(func() {
-		s.debugf("session stopping")
+		s.debugf("session stopping session=%d", s.traceSession)
 		s.stopping.Store(true)
 		s.cancel()
 		s.setStatus("speech.saving", nil, widget.MediumImportance)
@@ -997,7 +1133,7 @@ func (s *interviewAssistant) shutdown() {
 			if err := s.session.Finish(status, entries, runErr); err != nil {
 				log.Printf("finish interview session: %v", err)
 			}
-			s.debugf("session finished status=%q", status)
+			s.debugf("session finished session=%d status=%q", s.traceSession, status)
 			s.closeDebugLog()
 			fyne.DoAndWait(func() {
 				if s.window != nil {
