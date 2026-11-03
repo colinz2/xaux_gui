@@ -8,6 +8,19 @@ go run src/main.go
 
 录音由进程内的 `pkg/ffaudio` 完成，不需要在 `PATH` 中安装或配置外部录音程序。
 
+### Linux 构建和音频
+
+Linux 使用 PulseAudio 采集麦克风和扬声器对应的 monitor source；也可以使用提供 PulseAudio 兼容服务的 PipeWire。需要运行中的音频服务和可访问的设备。Debian/Ubuntu 可安装构建依赖：
+
+```bash
+sudo apt install build-essential pkg-config libpulse-dev libgl1-mesa-dev xorg-dev libgtk-3-dev
+go build -o xaux_gui ./src
+```
+
+使用 `go.mod` 指定版本或更新版本的 Go，且不能禁用 cgo。扬声器采集使用所选输出设备的 monitor；麦克风列表不包含 monitor source。音频由服务端转换为采集请求的格式，再由程序转换成 16 kHz 单声道 PCM。如果连接音频服务失败或设备不可用，应用会报告错误。
+
+Linux 使用未修改的上游 PulseAudio 采集后端，其实际采集缓冲和恢复延迟由音频服务决定，可能大于请求的缓冲时长。隔离虚拟设备测试中，扬声器暂停后恢复采集曾需要约 2 秒；实际设备和服务的表现可能不同。
+
 首页直接显示扬声器和麦克风设备选择；从 **开始 > 设置** 配置大模型参数和会话目录。**关于 > 版本显示** 可查看软件构建版本及主要第三方组件信息。
 
 在 **开始 > 设置 > 界面语言** 可选择简体中文或 English；默认简体中文，选择会保存在应用偏好中并在下次启动时恢复。主菜单、设置、录音、转写、面试、会话历史及版本窗口会即时更新，切换不会翻译或更改用户输入、既有会话内容或模型输出。应用的确认、信息和错误对话框使用打开时选择的语言；已打开的这些对话框及新建转写会话弹窗需关闭后重新打开才会切换。当前仍有部分错误提示尚未翻译，系统原生窗口及 Fyne 自带控件的文字可能跟随系统语言。
@@ -88,3 +101,5 @@ FFAUDIO_HARDWARE_TEST=1 go test ./pkg/ffaudio -run Hardware -v
 ```
 
 扬声器回采测试期间应播放系统声音；静默输出端在 WASAPI 下可能合法地返回空缓冲区。播放声音后如需强制断言回采必须产生数据，可同时设置 `FFAUDIO_REQUIRE_LOOPBACK_DATA=1`。
+
+Linux 上可使用 `go test ./pkg/ffaudio ./pkg/sound_cap` 单独验证音频封装；完整的 `./pkg/...` 测试还需要旧版 PortAudio 和 soxr 包的开发依赖（Debian/Ubuntu：`portaudio19-dev libsoxr-dev`）。`TestPulseVirtualDevices` 是可选的隔离集成测试：设置 `XAUX_PULSE_VIRTUAL_TEST=1` 并将 `PULSE_SERVER` 指向专用的虚拟 PulseAudio 服务，按测试代码准备两个虚拟输出和一个虚拟输入；不要指向正在使用的桌面音频服务。

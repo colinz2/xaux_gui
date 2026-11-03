@@ -7,21 +7,27 @@
 
 /*
 Detect CPU
-	FF_AMD64 FF_X86 FF_ARM FF_64
+	FF_AMD64 FF_X86 FF_ARM64 FF_ARM
 	FF_LITTLE_ENDIAN FF_BIG_ENDIAN
+	FF_64 FF_SSE2
 Detect OS
-	FF_UNIX FF_WIN FF_ANDROID
+	FF_UNIX FF_WIN FF_LINUX FF_ANDROID FF_BSD
 Base types
 	ffbyte ffushort ffint ffuint ffint64 ffuint64 ffsize ffssize
 FF_ASSERT
-FF_EXTERN
+FF_EXTERN FF_INLINE_EXTERN
+ff_likely ff_unlikely
 ff_printf
 ffmin ffmin64
 ffmax
 ffint_abs
+FFINT_JOIN64
+FFINT_DIVSAFE
+FF_SWAP
 FF_COUNT FFS_LEN
 FF_OFF FF_PTR
-FF_STRUCTPTR
+FF_CONTAINER
+FF_STRUCTALIGN
 Endian conversion:
 	ffint_be_cpu16 ffint_be_cpu32 ffint_be_cpu64
 	ffint_le_cpu16 ffint_le_cpu32 ffint_le_cpu64
@@ -48,30 +54,38 @@ ffmem_stack
 ffmem_cmp ffmem_fill ffmem_findbyte
 ffmem_zero ffmem_zero_obj
 ffmem_copy ffmem_move
+ffcpu_prefetch_l1 ffcpu_prefetch_l2
 */
 
 /* Detect CPU */
-#if defined FF_AMD64 || defined FF_X86 || defined FF_ARM
-	// already defined
-
-#elif defined __amd64__ || defined _M_AMD64
+#if defined __amd64__ || defined _M_AMD64
 	#define FF_AMD64
 	#define FF_LITTLE_ENDIAN
 	#define FF_64
+	#define FF_SSE2
 
 #elif defined __i386__ || defined _M_IX86
 	#define FF_X86
 	#define FF_LITTLE_ENDIAN
+	#define FF_SSE2
 
-#elif defined __arm__ || defined _M_ARM || defined __aarch64__
+#elif defined __aarch64__
+	#define FF_ARM64
+	#define FF_64
+
+#elif defined __arm__ || defined _M_ARM
 	#define FF_ARM
-	#define FF_BIG_ENDIAN
-	#ifdef __LP64__
-		#define FF_64
-	#endif
 
 #else
 	#warning "This CPU is not supported"
+#endif
+
+#if defined FF_ARM64 || defined FF_ARM
+	#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+		#define FF_LITTLE_ENDIAN
+	#else
+		#define FF_BIG_ENDIAN
+	#endif
 #endif
 
 
@@ -81,15 +95,36 @@ ffmem_copy ffmem_move
 
 #elif defined _WIN32 || defined _WIN64 || defined __CYGWIN__
 	#define FF_WIN
-	#include <windows.h>
-	#include <stdlib.h>
 
-#else
-	#if defined __linux__ && defined ANDROID
+#elif defined __APPLE__ && defined __MACH__
+	#define FF_UNIX
+	#define FF_APPLE
+
+#elif defined __linux__
+	#define FF_LINUX
+	#define FF_UNIX
+	#ifdef ANDROID
 		#define FF_ANDROID
 	#endif
+	#ifndef _POSIX_C_SOURCE
+		#define _POSIX_C_SOURCE  200112L // for posix_memalign()
+	#endif
 
+#elif defined __unix__
 	#define FF_UNIX
+	#include <sys/param.h>
+	#if defined BSD
+		#define FF_BSD
+	#endif
+
+#else
+	#warning "This OS is not supported"
+#endif
+
+#if defined FF_WIN
+	#include <windows.h>
+	#include <stdlib.h>
+#else
 	#include <stdlib.h>
 	#include <string.h>
 	#include <unistd.h>
@@ -124,6 +159,23 @@ ffmem_copy ffmem_move
 	#define FF_EXTERN extern
 #endif
 
+#ifdef FFBASE_OPT_SIZE
+	#define FF_INLINE_EXTERN  FF_EXTERN
+#else
+	#define FF_INLINE_EXTERN  static inline
+#endif
+
+#define FF_EXPORT  __attribute__((visibility("default")))
+
+
+/** Expect the expression to be mostly true,
+ placing the branch closer to the current execution pointer. */
+#define ff_likely(x)  __builtin_expect(!!(x), 1)
+
+/** Expect the expression to be mostly false,
+ placing the branch farther. */
+#define ff_unlikely(x)  __builtin_expect(!!(x), 0)
+
 
 #include <stdio.h>
 /** Formatted print to stdout
@@ -156,6 +208,18 @@ static inline ffuint64 ffmin64(ffuint64 a, ffuint64 b)
 #define FFINT_JOIN64(hi, lo) \
 	(((ffuint64)hi) << 32) | (lo)
 
+/** Perform integer division and protect against division by zero.
+Return 0 on error */
+#define FFINT_DIVSAFE(val, by) \
+	((by) != 0 ? (val) / (by) : 0)
+
+/** Set new value and return the old value. */
+#define FF_SWAP(ptr, val) \
+({ \
+	__typeof__(*ptr) __tmp = *ptr; \
+	*ptr = val; \
+	__tmp; \
+})
 
 /** Get N of elements in a static C array */
 #define FF_COUNT(ar)  (sizeof(ar) / sizeof(ar[0]))
@@ -175,8 +239,12 @@ static inline ffuint64 ffmin64(ffuint64 a, ffuint64 b)
 #define FF_PTR(struct_ptr, field_off)  ((void*)((char*)(struct_ptr) + (field_off)))
 
 /** Get struct pointer by its field pointer */
-#define FF_STRUCTPTR(struct_type, field_name, field_ptr) \
+#define FF_CONTAINER(struct_type, field_name, field_ptr) \
 	((struct_type*)((char*)field_ptr - FF_OFF(struct_type, field_name)))
+#define FF_STRUCTPTR  FF_CONTAINER
+
+/** Set alignment for a struct */
+#define FF_STRUCTALIGN(n)  __attribute__((aligned(n)))
 
 
 /** Swap bytes
@@ -292,7 +360,7 @@ static inline int ffbit_array_test(const void *d, ffsize bit)
 }
 
 /** Set bit and return its previous value */
-static inline int ffbit_array_set(const void *d, ffsize bit)
+static inline int ffbit_array_set(void *d, ffsize bit)
 {
 	ffbyte *b = (ffbyte*)d + bit / 8;
 	bit = 7 - (bit % 8);
@@ -316,10 +384,27 @@ align: must be a power of 2 */
 #define ffint_align_ceil(n, align) \
 	ffint_align_floor((n) + (align) - 1, align)
 
-/** Return TRUE if number is a power of 2 */
+/** Return TRUE if number is a power of 2.
+Example:
+	4   (0100) &
+	4-1 (0011) =
+	0   (0000) => TRUE
+Example:
+	3   (0011) &
+	3-1 (0010) =
+	2   (0010) => FALSE
+*/
 #define ffint_ispower2(n)  ((n) >= 2 && (((n) - 1) & (n)) == 0)
 
-/** Align number to the next power of 2
+/** Align number to the next power of 2.
+Example:
+	6    (0110)
+	6-1  (0101) -> MSB=#3
+	1<<3 (1000) = 8
+Example:
+	4    (0100)
+	4-1  (0011) -> MSB=#2
+	1<<2 (0100) = 4
 Note: value n > 2^63 is not supported */
 static inline ffuint64 ffint_align_power2(ffuint64 n)
 {
@@ -333,6 +418,18 @@ static inline ffuint64 ffint_align_power2(ffuint64 n)
 #define ffsz_len(sz)  strlen(sz)
 #define ffwsz_len(sz)  wcslen(sz)
 
+#define FFMEM_ASSERT(ptr)  (ptr)
+#ifdef FFBASE_MEM_ASSERT
+	#include <assert.h>
+	#undef FFMEM_ASSERT
+	/** Call assert() on memory allocation failure */
+	#define FFMEM_ASSERT(ptr) \
+	({ \
+		void *p = ptr; \
+		assert(p != NULL); \
+		p; \
+	})
+#endif
 
 /* Heap allocation */
 #if !defined _FFBASE_MEM_ALLOC
@@ -342,19 +439,19 @@ static inline ffuint64 ffint_align_power2(ffuint64 n)
 
 static inline void* ffmem_alloc(ffsize size)
 {
-	return HeapAlloc(GetProcessHeap(), 0, size);
+	return FFMEM_ASSERT(HeapAlloc(GetProcessHeap(), 0, size));
 }
 
 static inline void* ffmem_calloc(ffsize n, ffsize elsize)
 {
-	return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, n * elsize);
+	return FFMEM_ASSERT(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, n * elsize));
 }
 
 static inline void* ffmem_realloc(void *ptr, ffsize new_size)
 {
 	if (ptr == NULL)
-		return HeapAlloc(GetProcessHeap(), 0, new_size);
-	return HeapReAlloc(GetProcessHeap(), 0, ptr, new_size);
+		return FFMEM_ASSERT(HeapAlloc(GetProcessHeap(), 0, new_size));
+	return FFMEM_ASSERT(HeapReAlloc(GetProcessHeap(), 0, ptr, new_size));
 }
 
 static inline void ffmem_free(void *ptr)
@@ -362,21 +459,31 @@ static inline void ffmem_free(void *ptr)
 	HeapFree(GetProcessHeap(), 0, ptr);
 }
 
+static inline void* ffmem_align(ffsize size, ffsize align)
+{
+	return FFMEM_ASSERT(_aligned_malloc(size, align));
+}
+
+static inline void ffmem_alignfree(void *ptr)
+{
+	_aligned_free(ptr);
+}
+
 #else // UNIX:
 
 static inline void* ffmem_alloc(ffsize size)
 {
-	return malloc(size);
+	return FFMEM_ASSERT(malloc(size));
 }
 
 static inline void* ffmem_calloc(ffsize n, ffsize elsize)
 {
-	return calloc(n, elsize);
+	return FFMEM_ASSERT(calloc(n, elsize));
 }
 
 static inline void* ffmem_realloc(void *ptr, ffsize new_size)
 {
-	return realloc(ptr, new_size);
+	return FFMEM_ASSERT(realloc(ptr, new_size));
 }
 
 static inline void ffmem_free(void *ptr)
@@ -384,49 +491,13 @@ static inline void ffmem_free(void *ptr)
 	free(ptr);
 }
 
-#endif
-
-#if defined FF_WIN || defined FF_ANDROID
-
-/* (allocated-start) (free space) (pointer to allocated-start) (aligned) ... (allocated-end) */
-static inline void* ffmem_align(ffsize size, ffsize align)
-{
-	if ((align % sizeof(void*)) != 0) {
-#ifdef FF_WIN
-		SetLastError(ERROR_INVALID_PARAMETER);
-#else
-		errno = EINVAL;
-#endif
-		return NULL;
-	}
-
-	void *buf;
-	if (NULL == (buf = ffmem_alloc(size + align + sizeof(void*))))
-		return NULL;
-
-	void *al = (void*)(ffsize)ffint_align_ceil2((ffsize)buf + sizeof(void*), align);
-	*((void**)al - 1) = buf; // remember the original pointer
-	return al;
-}
-
-static inline void ffmem_alignfree(void *ptr)
-{
-	if (ptr == NULL)
-		return;
-
-	void *buf = *((void**)ptr - 1);
-	ffmem_free(buf);
-}
-
-#else // #if defined FF_WIN || defined FF_ANDROID
-
 static inline void* ffmem_align(ffsize size, ffsize align)
 {
 	void *buf;
 	int e = posix_memalign(&buf, align, size);
 	if (e != 0) {
 		errno = e;
-		return NULL;
+		return FFMEM_ASSERT(NULL);
 	}
 	return buf;
 }
@@ -437,7 +508,6 @@ static inline void ffmem_alignfree(void *ptr)
 }
 
 #endif
-
 
 /** Allocate heap memory region
 Return NULL on error */
@@ -471,13 +541,13 @@ static void ffmem_alignfree(void *ptr);
 
 
 /** Reserve stack buffer */
-#define ffmem_stack(size)  alloca(size)
+#define ffmem_stack(size)  __builtin_alloca(size)
 
 #define FFMEM_STACK_THRESHOLD  4096
 
 /** Reserve stack or allocate a heap buffer */
 #define _ffmem_alloc_stackorheap(size) \
-	((size) < FFMEM_STACK_THRESHOLD) ? alloca(size) : ffmem_alloc(size)
+	((size) < FFMEM_STACK_THRESHOLD) ? __builtin_alloca(size) : ffmem_alloc(size)
 
 #define _ffmem_free_stackorheap(ptr, size) \
 ({ \
@@ -522,6 +592,13 @@ static inline ffsize ffmem_ncopy(void *dst, ffsize cap, const void *src, ffsize 
 
 /** Safely copy data (overlapping regions) */
 #define ffmem_move(dst, src, len)  (void) memmove(dst, src, len)
+
+
+/** Begin loading data at `ptr` to L1 (and L2) cache */
+#define ffcpu_prefetch_l1(ptr)  __builtin_prefetch(ptr, 0, 3)
+
+/** Begin loading data at `ptr` to L2 cache */
+#define ffcpu_prefetch_l2(ptr)  __builtin_prefetch(ptr, 0, 2)
 
 FF_EXTERN int _ffcpu_features;
 

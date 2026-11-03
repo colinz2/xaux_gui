@@ -22,12 +22,28 @@ fflock_unlock
 #define ffthread_yield  sched_yield
 #endif
 
-#include <emmintrin.h>
-#define ffcpu_pause()  _mm_pause()
-
+#if defined FF_SSE2
+	#include <emmintrin.h>
+	#define ffcpu_pause()  _mm_pause()
+#else
+	#define ffcpu_pause()
+#endif
 
 /** Block execution until the variable is modified by another thread */
 static inline void ffint_wait_until_equal(ffuint *p, ffuint expected)
+{
+	for (;;) {
+		for (ffuint n = 0;  n != 2048;  n++) {
+			if (FFINT_READONCE(*p) == expected)
+				return;
+			ffcpu_pause();
+		}
+
+		ffthread_yield();
+	}
+}
+
+static inline void ffintz_wait_until_equal(ffsize *p, ffsize expected)
 {
 	for (;;) {
 		for (ffuint n = 0;  n != 2048;  n++) {

@@ -23,6 +23,7 @@ typedef struct ffstr {
 GETTERS
 SET
 	FFSTR_INITZ FFSTR_INITN FFSTR_INITSTR
+	FFSTR_Z
 COMPARE
 	ffstr_cmp ffstr_cmp2 ffstr_cmpz
 	ffstr_eq ffstr_eq2 ffstr_eqz ffstr_eqcz
@@ -77,7 +78,7 @@ ALGORITHMS
 	ffs_cmpz ffs_icmp ffs_icmpz ffs_matchz
 	ffs_split
 	ffs_findstr ffs_ifindstr ffs_findchar ffs_findany
-	ffs_rfindchar ffs_rfindstr ffs_rfindany
+	ffs_rfindchar ffws_rfindchar ffs_rfindstr ffs_rfindany
 	ffs_skipchar ffs_skipany ffs_skip_ranges
 	ffs_rskipany
 	ffs_lower ffs_upper ffs_titlecase
@@ -123,14 +124,14 @@ Return 0 if equal
 static inline int ffs_cmpz(const char *s, ffsize len, const char *sz)
 {
 	for (ffsize i = 0;  i != len;  i++) {
-		int cl = s[i];
-		int cr = sz[i];
+		ffuint cl = (ffbyte)s[i];
+		ffuint cr = (ffbyte)sz[i];
 
 		if (cr == '\0')
 			return 1; // s > sz
 
 		if (cl != cr) {
-			if ((ffuint)cl < (ffuint)cr)
+			if (cl < cr)
 				return -1; // s < sz
 			return 1; // s > sz
 		}
@@ -148,8 +149,8 @@ Return 0 if equal
 static inline int ffs_icmp(const char *sl, const char *sr, ffsize n)
 {
 	for (ffsize i = 0;  i != n;  i++) {
-		int cl = sl[i];
-		int cr = sr[i];
+		ffuint cl = (ffbyte)sl[i];
+		ffuint cr = (ffbyte)sr[i];
 
 		if (cl != cr) {
 			if (cl >= 'A' && cl <= 'Z')
@@ -170,8 +171,8 @@ Return 0 if equal
 static inline int ffs_icmpz(const char *s, ffsize len, const char *sz)
 {
 	for (ffsize i = 0;  i != len;  i++) {
-		int cl = s[i];
-		int cr = sz[i];
+		ffuint cl = (ffbyte)s[i];
+		ffuint cr = (ffbyte)sz[i];
 
 		if (cr == '\0')
 			return 1; // s > sz
@@ -192,6 +193,18 @@ static inline int ffs_icmpz(const char *s, ffsize len, const char *sz)
 	if (sz[len] != '\0')
 		return -1; // s < sz
 	return 0; // s == sz
+}
+
+/** Compare strings.
+Return 0 if equal;
+  or position +1 at which the strings differ. */
+static inline ffssize ffs_cmpz_n(const char *s, ffsize n, const char *sz)
+{
+	for (ffsize i = 0;  i != n;  i++) {
+		if (sz[i] == '\0' || s[i] != sz[i])
+			return ((ffbyte)s[i] < (ffbyte)sz[i]) ? -(ffssize)(i+1) : (ffssize)(i+1);
+	}
+	return (sz[n] != '\0') ? -(ffssize)(n+1) : 0;
 }
 
 /** Return TRUE if 's' starts with 'prefix' */
@@ -314,28 +327,52 @@ static inline ffssize ffs_rfindchar(const char *s, ffsize len, int search)
 	return -1;
 }
 
+/** Find character from the end
+Return the position from the beginning
+  -1: not found */
+static inline ffssize ffws_rfindchar(const wchar_t *s, ffsize len, wchar_t search)
+{
+	for (ffssize i = len - 1;  i >= 0;  i--) {
+		if (search == s[i])
+			return i;
+	}
+	return -1;
+}
+
 #ifdef __SSE4_2__
 #include <ffbase/cpuid.h>
 #include <nmmintrin.h>
 #include <smmintrin.h>
 
+static void ffmem_copy_static(void *dst, const void *src, ffsize n)
+{
+	switch (n) {
+	case 2:
+		*(ffushort*)dst = *(ffushort*)src; break;
+	case 4:
+		*(ffuint*)dst = *(ffuint*)src; break;
+	case 6:
+		*(ffuint*)dst = *(ffuint*)src;
+		*(ffushort*)(((char*)dst)+4) = *(ffushort*)((char*)src+4);
+		break;
+	case 8:
+		*(ffuint64*)dst = *(ffuint64*)src; break;
+	case 10:
+		*(ffuint64*)dst = *(ffuint64*)src;
+		*(ffushort*)(((char*)dst)+8) = *(ffushort*)((char*)src+8);
+		break;
+	case 16:
+		*(ffuint64*)dst = *(ffuint64*)src;
+		*(ffuint64*)(((char*)dst)+8) = *(ffuint64*)((char*)src+8);
+		break;
+	}
+}
+
 /* Similar to SSE-optimized strpbrk() except it doesn't stop at NUL character */
 static void* _ffmem_findany_sse42(const void *d, ffsize n, const char *anyof, ffuint anyof_len)
 {
 	__m128i mask;
-	// we should just use memcpy() here, but there's no guarantee it will be inlined
-	switch (anyof_len) {
-	case 2:
-		*(ffushort*)&mask = *(ffushort*)anyof; break;
-	case 4:
-		*(ffuint*)&mask = *(ffuint*)anyof; break;
-	case 6:
-		*(ffuint*)&mask = *(ffuint*)anyof;
-		*(ffushort*)(((char*)&mask)+4) = *(ffushort*)(anyof+4);
-		break;
-	case 8:
-		*(ffuint64*)&mask = *(ffuint64*)anyof; break;
-	}
+	ffmem_copy_static(&mask, anyof, anyof_len);
 
 	const __m128i *p = (__m128i*)d, *end = (__m128i*)((char*)d+n);
 	while (p+1 <= end) {
@@ -351,7 +388,11 @@ static void* _ffmem_findany_sse42(const void *d, ffsize n, const char *anyof, ff
 	if (p != end) {
 		n = (char*)end - (char*)p;
 		__m128i r;
+#ifdef FFBASE_MEM_ASAN
+		if (1)
+#else
 		if (((ffsize)(p+1) & ~0x0f) == ((ffsize)(p+1) & ~0x0fff)) // avoid the possibility of crashing if the 16byte region crosses 4k boundary
+#endif
 			ffmem_copy(&r, p, n);
 		else
 			r = _mm_loadu_si128(p);
@@ -366,23 +407,7 @@ static void* _ffmem_findany_sse42(const void *d, ffsize n, const char *anyof, ff
 static int _ffs_skip_ranges_sse42(const void *d, ffsize n, const char *ranges, ffuint ranges_len)
 {
 	__m128i mask;
-	// we should just use memcpy() here, but there's no guarantee it will be inlined
-	switch (ranges_len) {
-	case 2:
-		*(ffushort*)&mask = *(ffushort*)ranges; break;
-	case 4:
-		*(ffuint*)&mask = *(ffuint*)ranges; break;
-	case 6:
-		*(ffuint*)&mask = *(ffuint*)ranges;
-		*(ffushort*)(((char*)&mask)+4) = *(ffushort*)(ranges+4);
-		break;
-	case 8:
-		*(ffuint64*)&mask = *(ffuint64*)ranges; break;
-	case 10:
-		*(ffuint64*)&mask = *(ffuint64*)ranges;
-		*(ffushort*)(((char*)&mask)+8) = *(ffushort*)(ranges+8);
-		break;
-	}
+	ffmem_copy_static(&mask, ranges, ranges_len);
 
 	const __m128i *p = (__m128i*)d, *end = (__m128i*)((char*)d+n);
 	while (p+1 <= end) {
@@ -397,7 +422,11 @@ static int _ffs_skip_ranges_sse42(const void *d, ffsize n, const char *ranges, f
 	if (p != end) {
 		n = (char*)end - (char*)p;
 		__m128i r;
+#ifdef FFBASE_MEM_ASAN
+		if (1)
+#else
 		if (((ffsize)(p+1) & ~0x0f) == ((ffsize)(p+1) & ~0x0fff)) // avoid the possibility of crashing if the 16byte region crosses 4k boundary
+#endif
 			ffmem_copy(&r, p, n);
 		else
 			r = _mm_loadu_si128(p);
@@ -484,31 +513,39 @@ static inline ffsize ffs_skipchar(const char *s, ffsize len, int skip_char)
 	return i;
 }
 
-/** Remove any of matching bytes from the beginning */
+/** Remove any of matching bytes from the beginning.
+Return N of bytes skipped */
 static inline ffsize ffs_skipany(const char *s, ffsize len, const char *skip_chars, ffsize skip_chars_len)
 {
-	ffsize i;
-	for (i = 0;  i != len;  i++) {
-		if (ffs_findchar(skip_chars, skip_chars_len, s[i]) < 0)
-			break;
+	for (ffsize i = 0;  i != len;  i++) {
+		for (ffsize j = 0;  ;  j++) {
+			if (j == skip_chars_len)
+				return i;
+			if (s[i] == skip_chars[j])
+				break;
+		}
 	}
-	return i;
+	return len;
 }
 
-/** Remove any of matching bytes from the end */
+/** Remove any of matching bytes from the end.
+Return N of bytes skipped */
 static inline ffsize ffs_rskipany(const char *s, ffsize len, const char *skip_chars, ffsize skip_chars_len)
 {
-	ffssize i;
-	for (i = len - 1;  i >= 0;  i--) {
-		if (ffs_findchar(skip_chars, skip_chars_len, s[i]) < 0)
-			break;
+	for (ffssize i = len - 1;  i >= 0;  i--) {
+		for (ffsize j = 0;  ;  j++) {
+			if (j == skip_chars_len)
+				return len - (i + 1);
+			if (s[i] == skip_chars[j])
+				break;
+		}
 	}
-	return len - (i + 1);
+	return len;
 }
 
 /** Skip bytes while they are within the specified range
-Return N of bytes skipped
- <0 on error */
+Return offset of the first out-of-range byte
+ <0: all bytes were skipped */
 static inline int ffs_skip_ranges(const char *s, ffsize len, const char *ranges, ffsize ranges_len)
 {
 	FF_ASSERT(ranges_len%2 == 0);
@@ -520,19 +557,19 @@ static inline int ffs_skip_ranges(const char *s, ffsize len, const char *ranges,
 		_ffcpu_features = i.features[0];
 	}
 
-	if ((ranges_len == 2 || ranges_len == 4 || ranges_len == 6 || ranges_len == 8 || ranges_len == 10) && (_ffcpu_features & (1<<20))) {
+	if ((ranges_len == 2 || ranges_len == 4 || ranges_len == 6 || ranges_len == 8 || ranges_len == 10 || ranges_len == 16)
+		&& (_ffcpu_features & (1<<20))) {
 		return _ffs_skip_ranges_sse42(s, len, ranges, ranges_len);
 	}
 #endif
 
 	for (ffsize i = 0;  i != len;  i++) {
-		ffsize j;
-		for (j = 0;  j != ranges_len;  j += 2) {
+		for (ffsize j = 0;  ;  j += 2) {
+			if (j == ranges_len)
+				return i;
 			if (ranges[j] <= s[i] && s[i] <= ranges[j+1])
 				break;
 		}
-		if (j == ranges_len)
-			return i;
 	}
 	return -1;
 }
@@ -621,7 +658,7 @@ flags: enum FFS_WILDCARD
 Return 0 if match */
 static inline int ffs_wildcard(const char *pattern, ffsize pattern_len, const char *s, ffsize len, ffuint flags)
 {
-	ffsize i, is = 0, astk = -1, astk_is = -1;
+	ffsize i, is = 0, astk = 0, astk_is = -1;
 	int c, cs;
 
 	for (i = 0;  i != pattern_len;  ) {
@@ -659,6 +696,9 @@ static inline int ffs_wildcard(const char *pattern, ffsize pattern_len, const ch
 			is++;
 
 		} else {
+			if (astk == 0)
+				return 1; // no match
+
 			i = astk;
 			is = ++astk_is;
 		}
@@ -690,21 +730,33 @@ static inline ffsize _ffsz_nlen(const char *s, ffsize maxlen)
 // SET
 // Note: don't use these functions for the string with allocated buffer.
 
-/** ffstr initializator: ffstr s = FFSTR_INIT("string") */
+/** ffstr s = FFSTR_Z("string") */
+#define FFSTR_Z(sz) \
+	(ffstr){ ffsz_len(sz), (char*)(sz) }
+
+/** ffstr s = FFSTR_N("string", 6) */
+#define FFSTR_N(s, n) \
+	(ffstr){ n, (char*)(s) }
+
+#define FFSTR_INITZ(sz) \
+	{ ffsz_len(sz), (char*)(sz) }
 #define FFSTR_INIT(s) \
 	{ ffsz_len(s), (char*)(s) }
 
-/** ffstr initializator: ffstr s = FFSTR_INITZ("string") */
-#define FFSTR_INITZ(s) \
-	{ ffsz_len(s), (char*)(s) }
-
-/** ffstr initializator: ffstr s = FFSTR_INITN(ptr, n) */
+/** ffstr s = FFSTR_INITN(ptr, n) */
 #define FFSTR_INITN(s, n) \
 	{ n, (char*)(s) }
 
-/** ffstr initializator: ffstr s = FFSTR_INIT2(ffstr) */
+/** ffstr s = FFSTR_INITSTR(ffstr) */
 #define FFSTR_INITSTR(str) \
 	{ (str)->len, (char*)(str)->ptr }
+
+/** Get substring at offset. */
+static inline ffstr ffstr_substr(const ffstr *s, ffsize off)
+{
+	FF_ASSERT(off <= s->len);
+	return (ffstr){ s->len - off, s->ptr + off };
+}
 
 /** Set data pointer and length: s = {data, length} */
 #define ffstr_set(s, data, n) \
@@ -823,7 +875,7 @@ static inline int ffstr_icmp(const ffstr *s, const char *cmp, ffsize n)
 	int r = ffs_icmp(s->ptr, cmp, ffmin(s->len, n));
 	if (r == 0 && s->len != n)
 		return (s->len < n) ? -1 : 1;
-	return 0;
+	return r;
 }
 
 static inline int ffstr_icmp2(const ffstr *s, const ffstr *cmp)

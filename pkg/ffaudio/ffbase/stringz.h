@@ -10,14 +10,15 @@
 #include <ffbase/string.h>
 
 /*
-ffsz_copyz ffsz_copyn
+ffsz_copyz ffsz_copyn ffsz_copystr
 ffsz_dupn ffsz_dup ffsz_dupstr
 ffsz_findchar
 ffsz_cmp ffsz_icmp ffsz_eq
 ffsz_match ffsz_matchz
 ffszarr_find ffszarr_ifind
 ffszarr_findsorted ffszarr_ifindsorted
-ffcharr_findsorted
+ffcharr_findsorted ffcharr_find_sorted_padding
+ffcharr_ifind_sorted ffcharr_ifind_sorted_padding
 */
 
 /** Copy string
@@ -47,6 +48,8 @@ static inline ffsize ffsz_copyn(char *dst, ffsize cap, const char *src, ffsize n
 	dst[n] = '\0';
 	return n + 1;
 }
+
+#define ffsz_copystr(dst, cap, str)  ffsz_copyn(dst, cap, (str)->ptr, (str)->len)
 
 /** Allocate memory and copy string */
 static inline char* ffsz_dupn(const char *src, ffsize n)
@@ -110,6 +113,8 @@ static inline int ffsz_icmp(const char *sz, const char *cmpz)
 		}
 	}
 }
+
+#define ffsz_ieq(sz, cmpz)  (!ffsz_icmp(sz, cmpz))
 
 static inline int ffsz_eq(const char *sz, const char *cmpz)
 {
@@ -211,21 +216,22 @@ static inline ffssize ffszarr_ifindsorted(const char *const *ar, ffsize n, const
 }
 
 
-/** Search a string in char[n][elsize] array.
+/** Search a string in char[n][el_size+padding] array.
 Return -1 if not found */
-static inline ffssize ffcharr_findsorted(const void *ar, ffsize n, ffsize elsize, const char *search, ffsize search_len)
+static inline ffssize ffcharr_find_sorted_padding(const void *ar, ffsize n, ffsize el_size, ffsize padding, const char *search, ffsize search_len)
 {
-	if (search_len > elsize)
+	if (search_len > el_size)
 		return -1; // the string's too large for this array
 
 	ffsize start = 0;
 	while (start != n) {
 		ffsize i = start + (n - start) / 2;
-		int r = ffmem_cmp(search, (char*)ar + i * elsize, search_len);
+		const char *ptr = (char*)ar + i * (el_size + padding);
+		int r = ffmem_cmp(search, ptr, search_len);
 
 		if (r == 0
-			&& search_len != elsize
-			&& ((char*)ar)[i * elsize + search_len] != '\0')
+			&& search_len != el_size
+			&& ptr[search_len] != '\0')
 			r = -1; // found "01" in {0,1,2}
 
 		if (r == 0)
@@ -237,3 +243,31 @@ static inline ffssize ffcharr_findsorted(const void *ar, ffsize n, ffsize elsize
 	}
 	return -1;
 }
+
+#define ffcharr_findsorted(ar, n, el_size, search, search_len) \
+	ffcharr_find_sorted_padding(ar, n, el_size, 0, search, search_len)
+
+/** Search (case-insensitive) a string in char[n][width+padding] array.
+Return -1 if not found */
+static inline ffssize ffcharr_ifind_sorted_padding(const void *ar, ffsize n, ffsize width, ffsize padding, const char *search, ffsize search_len)
+{
+	if (search_len > width)
+		return -1; // the string's too large for this array
+
+	ffsize start = 0;
+	while (start != n) {
+		ffsize i = start + (n - start) / 2;
+		const char *ptr = (char*)ar + i * (width + padding);
+		int r = ffs_icmpz(search, search_len, ptr);
+		if (r == 0)
+			return i;
+		else if (r < 0)
+			n = i;
+		else
+			start = i + 1;
+	}
+	return -1;
+}
+
+#define ffcharr_ifind_sorted(ar, n, width, search, search_len) \
+	ffcharr_ifind_sorted_padding(ar, n, width, 0, search, search_len)

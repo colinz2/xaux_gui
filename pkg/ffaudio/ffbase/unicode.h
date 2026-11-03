@@ -3,9 +3,12 @@
 */
 
 /*
+ffutf8_size
+ffutf8_len
 ffutf8_encode
 ffutf8_decode
 ffutf8_valid
+ffutf8_from_utf8
 ffutf8_from_utf16
 ffutf8_to_utf16
 ffutf8_from_cp
@@ -71,6 +74,23 @@ static inline ffuint ffutf8_size(ffuint ch)
 	else
 		n = 0;
 	return n;
+}
+
+/** Get the length of UTF-8 character.
+Return 0 on error */
+static inline ffuint ffutf8_len(const char *utf8, ffsize len)
+{
+	if (len == 0)
+		return 0;
+	ffuint d = (ffbyte)utf8[0];
+	if ((d & 0x80) == 0)
+		return 1;
+
+	// e.g. 110xxxxx -> 001xxxxx, 1111110x -> 0000001x
+	ffuint n = ffbit_find32(~(d << 24) & 0xfe000000);
+	if (!(n >= 3 && n <= 7))
+		return 0; // invalid first byte
+	return n - 1;
 }
 
 /** Convert 31-bit number to UTF-8
@@ -175,6 +195,8 @@ static inline int ffutf8_valid(const char *utf8, ffsize len)
 	return 1;
 }
 
+#define ffutf8_valid_str(str)  ffutf8_valid((str).ptr, (str).len)
+
 
 /** Return TRUE if UTF-16 code unit is in Basic Multilingual Plane
 (0..0xd7ff) and (0xe000..0xffff) */
@@ -195,6 +217,57 @@ static inline ffuint ffutf16_suppl(ffuint hi, ffuint lo)
 }
 
 #define _FFUTF8_REPLCHAR  "\xEF\xBF\xBD"
+
+/** Convert UTF-8 to UTF-8.
+Replace bad/incomplete codes with REPLACEMENT CHARACTER U+FFFD (UTF-8: 0xEF 0xBF 0xBD).
+dst: NULL: return required capacity
+Return
+  N of bytes written;
+  <0 if not enough space. */
+static inline ffssize ffutf8_from_utf8(char *dst, ffsize cap, const char *src, ffsize len, ffuint flags)
+{
+	(void)flags;
+	ffsize n = 0;
+	const char *end = src + len;
+	ffuint ch;
+
+	if (dst == NULL) {
+		while (src < end) {
+			int r = ffutf8_decode(src, end - src, &ch);
+			if (r < 0) {
+				n += 3;
+				break;
+			} else if (r == 0) {
+				src++;
+				n += 3;
+			} else {
+				src += r;
+				n += r;
+			}
+		}
+
+		return n;
+	}
+
+	while (src < end) {
+		int r = ffutf8_decode(src, end - src, &ch);
+		if (r <= 0) {
+			if (n + 3 > cap)
+				return -1;
+			ffmem_copy(dst + n, _FFUTF8_REPLCHAR, 3);
+			n += 3;
+			if (r < 0)
+				break;
+			src++;
+		} else {
+			ffmem_copy(dst + n, src, r);
+			src += r;
+			n += r;
+		}
+	}
+
+	return n;
+}
 
 /** Convert UTF-16 to UTF-8
 Replace bad/incomplete codes with REPLACEMENT CHARACTER U+FFFD (UTF-8: 0xEF 0xBF 0xBD).
@@ -292,19 +365,24 @@ Return N of bytes written;
  <0 on error */
 static inline ffssize ffutf8_to_utf16(char *dst, ffsize cap, const char *src, ffsize len, ffuint flags)
 {
+	const ffushort U_REPL = 0xFFFD;
 	ffsize n = 0;
 	ffuint ch;
 
 	if (dst == NULL) {
 		for (ffsize i = 0;  i < len;  ) {
 			int r = ffutf8_decode(src + i, len - i, &ch);
-			if (r <= 0)
-				return -1;
+			if (r <= 0) {
+				n += 2;
+				continue;
+			}
 			i += r;
 
 			if (ch > 0xffff
-				|| !ffutf16_basic(ch))
-				return -1;
+				|| !ffutf16_basic(ch)) {
+				n += 2;
+				continue;
+			}
 			n++;
 		}
 
@@ -315,13 +393,19 @@ static inline ffssize ffutf8_to_utf16(char *dst, ffsize cap, const char *src, ff
 	cap /= 2;
 	for (ffsize i = 0;  i < len;  ) {
 		int r = ffutf8_decode(src + i, len - i, &ch);
-		if (r <= 0)
-			return -1;
-		i += r;
+		if (r <= 0) {
+			// bad UTF-8 char
+			ch = U_REPL;
+			i++;
+		} else {
+			i += r;
+		}
 
 		if (ch > 0xffff
-			|| !ffutf16_basic(ch))
-			return -1;
+			|| !ffutf16_basic(ch)) {
+			// too large value or need surrogate pair
+			ch = U_REPL;
+		}
 
 		if (n >= cap)
 			return -1;
@@ -423,8 +507,7 @@ static inline ffssize ffutf8_from_cp(char *dst, ffsize cap, const char *src, ffs
 	};
 
 	flags -= _FFUNICODE_CP_BEGIN;
-	if (flags >= FF_COUNT(codes))
-		return -1;
+	FF_ASSERT(flags < FF_COUNT(codes));
 
 	const ffushort *cp = codes[flags];
 	ffsize n = 0;
@@ -493,7 +576,7 @@ static inline ffssize ffsz_utow_n(wchar_t *dst, ffsize cap_wchars, const char *s
 	ffsize cap = (cap_wchars != 0) ? cap_wchars-1 : 0;
 	ffssize r = ffutf8_to_utf16((char*)dst, cap * 2, s, len, FFUNICODE_UTF16LE);
 	if (dst == NULL)
-		return (r < 0) ? r : r+1;
+		return (r < 0) ? r : (r/2)+1;
 
 	if (cap_wchars == 0)
 		return 0;
