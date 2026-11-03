@@ -1,16 +1,17 @@
 package gui
 
 import (
-	"fmt"
-
 	"fyne.io/fyne/v2"
+	fyneDialog "fyne.io/fyne/v2/dialog"
 )
 
 const (
 	speechMenuName         = "语音"
-	realTimeTransMenuName  = "实时转写"
+	realTimeTransMenuName  = "转写"
+	interviewAssistantName = "面试"
 	recordMenuName         = "录音"
-	sessionHistoryMenuName = "会话历史"
+	sessionHistoryMenuName = "历史"
+	sessionHistoryItemName = "会话历史"
 	aboutMenuName          = "关于"
 	githubMenuName         = "github"
 )
@@ -20,20 +21,26 @@ func newMainMenu() *fyne.MainMenu {
 	if err != nil {
 		panic(err)
 	}
-	settingItem := fyne.NewMenuItem(setting.GetAppName(), func() {
-		if err := currentMainWin.ac.openApp(setting); err != nil {
-			panic(fmt.Errorf("open settings: %w", err))
+	settingsItem := fyne.NewMenuItem("设置", func() {
+		if err := setting.openConfigurationWindow(); err != nil {
+			fyneDialog.ShowError(err, currentMainWin.win)
 		}
+	})
+	exitItem := fyne.NewMenuItem("退出", func() {
+		currentMainWin.quitHandle()
 	})
 
 	realTimeTransItem := fyne.NewMenuItem(realTimeTransMenuName, runRealTimeTrans)
+	interviewAssistantItem := fyne.NewMenuItem(interviewAssistantName, runInterviewAssistant)
 	recordItem := fyne.NewMenuItem(recordMenuName, runRecorder)
-	sessionHistoryItem := fyne.NewMenuItem(sessionHistoryMenuName, runSessionHistory)
+	sessionHistoryItem := fyne.NewMenuItem(sessionHistoryItemName, runSessionHistory)
+	versionItem := fyne.NewMenuItem(versionMenuItemName, showVersionInformation)
 	githubItem := fyne.NewMenuItem(githubMenuName, openGithubPage)
 
 	return fyne.NewMainMenu(
-		fyne.NewMenu(appSettingName, settingItem),
-		fyne.NewMenu(speechMenuName, realTimeTransItem, recordItem, sessionHistoryItem),
-		fyne.NewMenu(aboutMenuName, githubItem),
+		fyne.NewMenu(appSettingName, settingsItem, exitItem),
+		fyne.NewMenu(speechMenuName, recordItem, realTimeTransItem, interviewAssistantItem),
+		fyne.NewMenu(sessionHistoryMenuName, sessionHistoryItem),
+		fyne.NewMenu(aboutMenuName, versionItem, githubItem),
 	)
 }

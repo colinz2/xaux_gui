@@ -46,13 +46,21 @@ func TestSpeechRTTransApplyASRResult(t *testing.T) {
 
 	speech.applyASRResult(capture, &x.AllResponse{
 		Type:   x.TypeRecognizing,
-		Result: x.RecognizeResult{Index: 0, Result: "partial", Interim: true},
+		Result: x.RecognizeResult{Index: 0, Result: "par", Interim: true},
 	})
-	if len(speech.listItems) != 1 || speech.listItems[0].content != "partial" {
+	if len(speech.listItems) != 1 || speech.listItems[0].content != "par" {
 		t.Fatalf("first zero-index result was not appended: %+v", speech.listItems)
 	}
 	if speech.rows[0].content.Wrapping != fyne.TextWrapBreak || speech.rows[0].status.Text != "识别中" {
 		t.Fatalf("partial result was not rendered as a wrapped interim row: %+v", speech.rows[0])
+	}
+
+	speech.applyASRResult(capture, &x.AllResponse{
+		Type:   x.TypeRecognizing,
+		Result: x.RecognizeResult{Index: 0, Result: "partial", Interim: true},
+	})
+	if len(speech.listItems) != 1 || speech.listItems[0].content != "partial" {
+		t.Fatalf("successive interim result did not update the existing row: %+v", speech.listItems)
 	}
 
 	speech.applyASRResult(capture, &x.AllResponse{
@@ -73,6 +81,58 @@ func TestSpeechRTTransApplyASRResult(t *testing.T) {
 	})
 	if len(speech.listItems) != 1 {
 		t.Fatal("closed transcription accepted a result")
+	}
+}
+
+func TestASRSoundCapFiltersDuplicateResultsAndResetsAtSentenceStart(t *testing.T) {
+	capture := &asrSoundCap{}
+	events := []*x.AllResponse{
+		{Type: x.TypeRecognizing, Result: x.RecognizeResult{Index: 0, Result: "你", Interim: true}},
+		{Type: x.TypeRecognizing, Result: x.RecognizeResult{Index: 0, Result: "你", Interim: true}},
+		{Type: x.TypeRecognizing, Result: x.RecognizeResult{Index: 0, Result: "你好", Interim: true}},
+		{Type: x.TypeSentenceEnd, Result: x.RecognizeResult{Index: 0, Result: "你好"}},
+		{Type: x.TypeSentenceEnd, Result: x.RecognizeResult{Index: 0, Result: "你好"}},
+		{Type: x.TypeSentenceStart},
+		{Type: x.TypeRecognizing, Result: x.RecognizeResult{Index: 0, Result: "新句", Interim: true}},
+	}
+	wantAccepted := []bool{true, false, true, true, false, true, true}
+
+	for i, event := range events {
+		accepted, _ := capture.acceptASRResult(event)
+		if accepted != wantAccepted[i] {
+			t.Errorf("event %d accepted = %t, want %t", i, accepted, wantAccepted[i])
+		}
+	}
+}
+
+func TestASRFinalityUsesProtocolEventType(t *testing.T) {
+	tests := []struct {
+		name     string
+		response *x.AllResponse
+		want     bool
+	}{
+		{
+			name: "recognizing remains interim even if interim flag is unset",
+			response: &x.AllResponse{
+				Type:   x.TypeRecognizing,
+				Result: x.RecognizeResult{Result: "识别中"},
+			},
+		},
+		{
+			name: "sentence end is final even if interim flag is set",
+			response: &x.AllResponse{
+				Type:   x.TypeSentenceEnd,
+				Result: x.RecognizeResult{Result: "已完成", Interim: true},
+			},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := asrResponseIsFinal(test.response); got != test.want {
+				t.Fatalf("asrResponseIsFinal() = %t, want %t", got, test.want)
+			}
+		})
 	}
 }
 
@@ -163,7 +223,7 @@ func TestTranscriptNearBottom(t *testing.T) {
 }
 
 func TestSpeechShutdownOnce(t *testing.T) {
-	speechWindowOpen.Store(false)
+	resetVoiceTasksForTest()
 	window := newSpeechRTTrans()
 	calls := make(chan struct{}, 2)
 	window.onClosed = func() { calls <- struct{}{} }
@@ -188,7 +248,7 @@ func TestSpeechShutdownOnce(t *testing.T) {
 }
 
 func TestSpeechWindowSingletonRelease(t *testing.T) {
-	speechWindowOpen.Store(false)
+	resetVoiceTasksForTest()
 	first := newSpeechRTTrans()
 	if first == nil {
 		t.Fatal("failed to acquire transcription window")

@@ -102,6 +102,43 @@ func TestSessionTranscriptAndDefaultName(t *testing.T) {
 	}
 }
 
+func TestInterviewReviewPersistsWithSessionManifest(t *testing.T) {
+	root := t.TempDir()
+	session, err := CreateSession(root, "面试复盘", SessionKindInterview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Finish(SessionStatusStopped, []SessionTranscriptEntry{
+		{Timestamp: "2026-01-02 03:04:05", Device: "扬声器", Content: "请介绍一下项目。"},
+		{Timestamp: "2026-01-02 03:04:10", Device: "麦克风", Content: "项目使用 Go 开发。"},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	info := session.Snapshot()
+	finishedAt := info.UpdatedAt
+	if err := saveInterviewReview(&info, "  ## 下一步练习\n- 补充项目结果  "); err != nil {
+		t.Fatal(err)
+	}
+	if !info.UpdatedAt.Equal(finishedAt) {
+		t.Fatal("saving a review changed the interview session end time")
+	}
+
+	sessions, err := LoadSessions(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ReviewFile != sessionInterviewReviewName {
+		t.Fatalf("review file was not recorded in the manifest: %+v", sessions)
+	}
+	review, err := os.ReadFile(filepath.Join(sessions[0].Directory, sessions[0].ReviewFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(review) != "## 下一步练习\n- 补充项目结果\n" {
+		t.Fatalf("unexpected saved review: %q", review)
+	}
+}
+
 func TestSessionHistoryWindow(t *testing.T) {
 	app := fynetest.NewApp()
 	defer app.Quit()
@@ -128,10 +165,17 @@ func TestSessionHistoryWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	win := &sessionHistoryWin{setting: &appSetting{Setting: Setting{sessionRootDir: root}}}
+	var openedPath string
+	win := &sessionHistoryWin{
+		setting: &appSetting{Setting: Setting{sessionRootDir: root}},
+		recordingOpener: func(path string) error {
+			openedPath = path
+			return nil
+		},
+	}
 	win.window = app.NewWindow("test")
 	defer win.window.Close()
-	win.window.Resize(fyne.NewSize(1100, 700))
+	win.window.Resize(fyne.NewSize(1100, 760))
 	win.buildContent()
 	win.searchSessions()
 	win.window.Show()
@@ -152,6 +196,12 @@ func TestSessionHistoryWindow(t *testing.T) {
 		}
 		if button.Disabled() != (i == 1) {
 			t.Fatalf("recording row %d disabled=%v, want %v", i, button.Disabled(), i == 1)
+		}
+		if i == 0 {
+			fynetest.Tap(button)
+			if openedPath != filepath.Join(session.Directory(), "microphone.wav") {
+				t.Fatalf("playback opened %q, want the selected recording", openedPath)
+			}
 		}
 	}
 	if label := win.recordings.Objects[1].(*fyne.Container).Objects[0].(*widget.Label); !strings.Contains(label.Text, "无音频数据") {
@@ -176,6 +226,189 @@ func TestSessionHistoryWindow(t *testing.T) {
 	}
 	if !strings.Contains(win.metadata.Text, "持续时长：00:00:00") {
 		t.Fatalf("history duration was not displayed: %q", win.metadata.Text)
+	}
+}
+
+func TestSessionHistoryDisplaysSavedInterviewReview(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+	root := t.TempDir()
+	session, err := CreateSession(root, "复盘显示", SessionKindInterview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Finish(SessionStatusStopped, []SessionTranscriptEntry{
+		{Timestamp: "2026-01-02 03:04:05", Device: "扬声器", Content: "如何处理并发？"},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	info := session.Snapshot()
+	if err := saveInterviewReview(&info, "## 待改进\n- 补充并发控制方案"); err != nil {
+		t.Fatal(err)
+	}
+
+	win := &sessionHistoryWin{setting: &appSetting{Setting: Setting{
+		sessionRootDir: root,
+		modelConfigDir: root,
+	}}}
+	win.window = app.NewWindow("test")
+	defer win.window.Close()
+	win.buildContent()
+	win.showSession(info)
+	if len(win.reviewActions.Objects) != 2 ||
+		win.reviewActions.Objects[0] != win.reviewButton ||
+		win.reviewActions.Objects[1] != win.deleteButton {
+		t.Fatal("review status must not share the action row with the review and delete buttons")
+	}
+	if !strings.Contains(win.review.Text, "补充并发控制方案") {
+		t.Fatalf("saved review was not shown: %q", win.review.Text)
+	}
+	if !win.review.Selectable {
+		t.Fatal("saved review text must be selectable and copyable")
+	}
+	if win.reviewEmpty.Visible() {
+		t.Fatal("review placeholder must be hidden when saved review content is shown")
+	}
+	if win.reviewButton.Disabled() || win.reviewButton.Text != "重新生成复盘" {
+		t.Fatalf("review action is not available: disabled=%v text=%q",
+			win.reviewButton.Disabled(), win.reviewButton.Text)
+	}
+	logData, err := os.ReadFile(filepath.Join(root, interviewDebugLogFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "enabled=true reason=\"saved_review_loaded\"") {
+		t.Fatalf("review action availability was not logged: %s", logData)
+	}
+}
+
+func TestSessionHistoryChangesAnalysisByTaskType(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+	root := t.TempDir()
+	win := &sessionHistoryWin{setting: &appSetting{Setting: Setting{sessionRootDir: root}}}
+	win.window = app.NewWindow("test")
+	defer win.window.Close()
+	win.buildContent()
+
+	transcription, err := CreateSession(root, "转写", SessionKindTranscription)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transcription.Finish(SessionStatusStopped, []SessionTranscriptEntry{
+		{Content: "讨论项目进度"},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	info := transcription.Snapshot()
+	finishedAt := info.UpdatedAt
+	if err := saveTranscriptionSummary(&info, "  项目进展顺利  "); err != nil {
+		t.Fatal(err)
+	}
+	if !info.UpdatedAt.Equal(finishedAt) {
+		t.Fatal("saving summary changed session end time")
+	}
+	sessions, err := LoadSessions(root)
+	if err != nil || len(sessions) != 1 || sessions[0].SummaryFile != sessionSummaryName {
+		t.Fatalf("summary manifest not persisted: sessions=%+v err=%v", sessions, err)
+	}
+	win.showSession(sessions[0])
+	if !strings.Contains(win.metadata.Text, "任务类型：转写") ||
+		!win.historyTabs.Visible() || win.transcriptTab.Text != "转写" ||
+		win.reviewTab.Text != "AI 总结" || win.reviewHeader.Text != "AI 总结" ||
+		win.reviewButton.Text != "重新生成总结" || win.review.Text != "项目进展顺利\n" ||
+		!win.review.Selectable {
+		t.Fatalf("transcription details incorrect: metadata=%q tab=%q button=%q text=%q",
+			win.metadata.Text, win.reviewTab.Text, win.reviewButton.Text, win.review.Text)
+	}
+
+	recording, err := CreateSession(root, "录音", SessionKindRecording)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recording.Finish(SessionStatusStopped, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	win.showSession(recording.Snapshot())
+	if !strings.Contains(win.metadata.Text, "任务类型：录音") || win.historyTabs.Visible() || win.reviewButton.Visible() {
+		t.Fatal("recording must not display transcription or AI analysis")
+	}
+	if err := saveSessionAnalysisResult(&info, ""); err == nil {
+		t.Fatal("empty summary must not be saved")
+	}
+	recordingInfo := recording.Snapshot()
+	if err := saveSessionAnalysisResult(&recordingInfo, "不支持"); err == nil {
+		t.Fatal("recording must not accept AI analysis")
+	}
+
+	interview, err := CreateSession(root, "面试", SessionKindInterview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	win.showSession(interview.Snapshot())
+	if !strings.Contains(win.metadata.Text, "任务类型：面试") ||
+		!win.historyTabs.Visible() || win.transcriptTab.Text != "面试对话" ||
+		win.reviewTab.Text != "AI 复盘" || win.reviewButton.Text != "一键生成复盘" ||
+		!win.reviewButton.Disabled() {
+		t.Fatalf("running interview details incorrect: metadata=%q tab=%q button=%q",
+			win.metadata.Text, win.reviewTab.Text, win.reviewButton.Text)
+	}
+	win.clearDetails()
+	if win.historyTabs.Visible() || win.reviewButton.Visible() {
+		t.Fatal("clearing selection should hide analysis")
+	}
+
+	running, err := CreateSession(root, "进行中", SessionKindTranscription)
+	if err != nil {
+		t.Fatal(err)
+	}
+	win.showSession(running.Snapshot())
+	if !win.reviewButton.Disabled() || win.reviewButton.Text != "一键生成总结" ||
+		!strings.Contains(win.reviewStatus.Text, "结束会话后") {
+		t.Fatal("running transcription should not allow summary generation")
+	}
+	if err := running.Finish(SessionStatusStopped, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	win.showSession(running.Snapshot())
+	if !win.reviewButton.Disabled() || !strings.Contains(win.reviewStatus.Text, "没有可用于总结") {
+		t.Fatal("missing transcript should not allow summary generation")
+	}
+	info.SummaryFile = "missing-summary.txt"
+	win.showSession(info)
+	if !strings.Contains(win.reviewStatus.Text, "读取总结失败") || win.reviewButton.Disabled() {
+		t.Fatal("missing saved summary should report an error and allow regeneration")
+	}
+}
+
+func TestTranscriptionSummaryInitializesConfigDirectory(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+	if err := saveModelConfig(app.Storage().RootURI().Path(), modelConfig{
+		BaseURL: "https://example.test/v1",
+		Model:   "test-model",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	session, err := CreateSession(root, "转写", SessionKindTranscription)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Finish(SessionStatusStopped, []SessionTranscriptEntry{{Content: "内容"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	setting := &appSetting{Setting: Setting{sessionRootDir: root}}
+	win := &sessionHistoryWin{setting: setting}
+	win.window = app.NewWindow("test")
+	defer win.window.Close()
+	win.buildContent()
+	win.showSession(session.Snapshot())
+	win.generateSessionAnalysis()
+	if setting.modelConfigDir != app.Storage().RootURI().Path() ||
+		!strings.Contains(win.reviewStatus.Text, "请填写 API Key") {
+		t.Fatalf("summary preflight did not load configuration: dir=%q status=%q",
+			setting.modelConfigDir, win.reviewStatus.Text)
 	}
 }
 

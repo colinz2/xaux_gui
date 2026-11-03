@@ -11,19 +11,15 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/realzhangm/xaux/pkg/x"
 )
 
-var (
-	speechWindowOpen atomic.Bool
-	activeSpeech     struct {
-		sync.Mutex
-		window *speechRTTrans
-	}
-)
+var activeSpeech struct {
+	sync.Mutex
+	window *speechRTTrans
+}
 
 type transcriptItem struct {
 	deviceName   string
@@ -69,7 +65,7 @@ type speechRTTrans struct {
 }
 
 func newSpeechRTTrans() *speechRTTrans {
-	if !speechWindowOpen.CompareAndSwap(false, true) {
+	if !acquireVoiceTask(realTimeTransMenuName) {
 		return nil
 	}
 	return &speechRTTrans{followLatest: true, shutdownDone: make(chan struct{})}
@@ -79,7 +75,18 @@ func (s *speechRTTrans) updateASRResult(capture *asrSoundCap, response *x.AllRes
 	if capture == nil || response == nil {
 		return
 	}
+	if response.Type == x.TypeSentenceStart {
+		capture.acceptASRResult(response)
+		fyne.Do(func() {
+			capture.resultIndex = -1
+			capture.writeListIndex = -1
+		})
+		return
+	}
 	if response.Type != x.TypeRecognizing && response.Type != x.TypeSentenceEnd {
+		return
+	}
+	if accepted, _ := capture.acceptASRResult(response); !accepted {
 		return
 	}
 	fyne.Do(func() {
@@ -97,23 +104,27 @@ func (s *speechRTTrans) applyASRResult(capture *asrSoundCap, response *x.AllResp
 
 	resultIndex := response.Result.Index
 	content := response.Result.Result
-	if capture.resultIndex == resultIndex &&
-		capture.writeListIndex >= 0 && capture.writeListIndex < len(s.listItems) {
+	sameResult := capture.resultIndex == resultIndex &&
+		capture.writeListIndex >= 0 && capture.writeListIndex < len(s.listItems)
+	if content == "" && !sameResult {
+		return
+	}
+	isFinal := asrResponseIsFinal(response)
+	if sameResult {
 		index := capture.writeListIndex
 		item := s.listItems[index]
-		item.content = content
-		item.final = !response.Result.Interim
+		if content != "" {
+			item.content = content
+		}
+		item.final = isFinal
 		s.updateTranscriptRow(index, item)
 	} else {
-		if content == "" {
-			return
-		}
 		item := &transcriptItem{
 			deviceName:   capture.deviceName,
 			isMicrophone: capture.isMicrophone,
 			timeString:   time.Now().Format("2006-01-02 15:04:05"),
 			content:      content,
-			final:        !response.Result.Interim,
+			final:        isFinal,
 		}
 		capture.writeListIndex = len(s.listItems)
 		if len(s.listItems) == 0 {
@@ -232,8 +243,6 @@ func (s *speechRTTrans) start(onClosed func(), onPause func() error, onResume fu
 	s.onClosed = onClosed
 	s.onPause = onPause
 	s.onResume = onResume
-	s.window = fyne.CurrentApp().NewWindow("实时转写")
-	s.window.Resize(fyne.NewSize(1000, 680))
 
 	s.status = widget.NewLabel("正在监听")
 	s.status.Importance = widget.SuccessImportance
@@ -279,19 +288,17 @@ func (s *speechRTTrans) start(onClosed func(), onPause func() error, onResume fu
 		}
 	}
 	latestBar := container.NewHBox(layout.NewSpacer(), s.latestButton)
-	s.window.SetContent(container.NewBorder(
+	content := container.NewBorder(
 		container.NewPadded(toolbar),
 		container.NewPadded(latestBar),
 		nil, nil,
 		s.scroll,
-	))
-	s.window.SetCloseIntercept(func() {
-		dialog.ShowConfirm("结束实时转写", "结束识别并保存当前转写结果吗？", func(confirm bool) {
-			if confirm {
-				s.shutdown()
-			}
-		}, s.window)
-	})
+	)
+	s.window = fyne.CurrentApp().NewWindow("转写")
+	s.window.SetContent(content)
+	s.window.Resize(fyne.NewSize(960, 640))
+	s.window.CenterOnScreen()
+	s.window.SetCloseIntercept(s.shutdown)
 	s.window.SetOnClosed(s.release)
 	s.running.Store(true)
 	activeSpeech.Lock()
@@ -401,10 +408,11 @@ func (s *speechRTTrans) shutdown() {
 			fyne.DoAndWait(func() {
 				s.running.Store(false)
 				if s.window != nil {
+					s.window.SetCloseIntercept(nil)
 					s.window.Close()
-				} else {
-					s.release()
 				}
+				s.release()
+				refreshActiveSessionHistory()
 			})
 			close(s.shutdownDone)
 		}()
@@ -418,7 +426,7 @@ func (s *speechRTTrans) release() {
 			activeSpeech.window = nil
 		}
 		activeSpeech.Unlock()
-		speechWindowOpen.Store(false)
+		releaseVoiceTask(realTimeTransMenuName)
 	})
 }
 

@@ -16,8 +16,11 @@ import (
 )
 
 const (
-	sessionManifestName   = "session.json"
-	sessionTranscriptName = "transcript.txt"
+	sessionManifestName        = "session.json"
+	sessionTranscriptName      = "transcript.txt"
+	sessionInterviewReviewName = "interview_review.txt"
+	sessionSummaryName         = "summary.txt"
+	sessionJobDescriptionName  = "job_description.txt"
 )
 
 type SessionStatus string
@@ -34,18 +37,22 @@ type SessionKind string
 const (
 	SessionKindRecording     SessionKind = "recording"
 	SessionKindTranscription SessionKind = "transcription"
+	SessionKindInterview     SessionKind = "interview"
 )
 
 type SessionInfo struct {
-	Name           string        `json:"name"`
-	CreatedAt      time.Time     `json:"created_at"`
-	UpdatedAt      time.Time     `json:"updated_at"`
-	Status         SessionStatus `json:"status"`
-	Kind           SessionKind   `json:"kind"`
-	Recordings     []string      `json:"recordings,omitempty"`
-	TranscriptFile string        `json:"transcript_file,omitempty"`
-	Error          string        `json:"error,omitempty"`
-	Directory      string        `json:"-"`
+	Name               string        `json:"name"`
+	CreatedAt          time.Time     `json:"created_at"`
+	UpdatedAt          time.Time     `json:"updated_at"`
+	Status             SessionStatus `json:"status"`
+	Kind               SessionKind   `json:"kind"`
+	Recordings         []string      `json:"recordings,omitempty"`
+	TranscriptFile     string        `json:"transcript_file,omitempty"`
+	ReviewFile         string        `json:"review_file,omitempty"`
+	SummaryFile        string        `json:"summary_file,omitempty"`
+	JobDescriptionFile string        `json:"job_description_file,omitempty"`
+	Error              string        `json:"error,omitempty"`
+	Directory          string        `json:"-"`
 }
 
 type SessionTranscriptEntry struct {
@@ -156,6 +163,31 @@ func (s *Session) AddRecording(fileName string) error {
 	return s.saveManifestLocked()
 }
 
+func (s *Session) SaveJobDescription(description string) error {
+	description, err := validateInterviewContext(description, "职位描述")
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.info.Kind != SessionKindInterview || s.info.Status != SessionStatusRunning {
+		return errors.New("只能为进行中的面试会话保存职位描述")
+	}
+	if description == "" {
+		return nil
+	}
+	if err := os.WriteFile(filepath.Join(s.info.Directory, sessionJobDescriptionName), []byte(description), 0o600); err != nil {
+		return fmt.Errorf("保存职位描述失败：%w", err)
+	}
+	updated := s.info
+	updated.JobDescriptionFile = sessionJobDescriptionName
+	if err := writeSessionManifest(updated); err != nil {
+		return err
+	}
+	s.info = updated
+	return nil
+}
+
 func (s *Session) Finish(status SessionStatus, transcript []SessionTranscriptEntry, taskErr error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -191,12 +223,16 @@ func (s *Session) Finish(status SessionStatus, transcript []SessionTranscriptEnt
 }
 
 func (s *Session) saveManifestLocked() error {
-	data, err := json.MarshalIndent(s.info, "", "  ")
+	return writeSessionManifest(s.info)
+}
+
+func writeSessionManifest(info SessionInfo) error {
+	data, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode session manifest: %w", err)
 	}
 	data = append(data, '\n')
-	manifestPath := filepath.Join(s.info.Directory, sessionManifestName)
+	manifestPath := filepath.Join(info.Directory, sessionManifestName)
 	temporaryPath := manifestPath + ".tmp"
 	if err := os.WriteFile(temporaryPath, data, 0o644); err != nil {
 		return fmt.Errorf("write session manifest: %w", err)
@@ -205,6 +241,63 @@ func (s *Session) saveManifestLocked() error {
 		_ = os.Remove(temporaryPath)
 		return fmt.Errorf("replace session manifest: %w", err)
 	}
+	return nil
+}
+
+func saveInterviewReview(info *SessionInfo, review string) error {
+	if info == nil || info.Kind != SessionKindInterview {
+		return errors.New("只能为面试会话保存复盘")
+	}
+	return saveSessionAnalysis(info, review, sessionInterviewReviewName, "复盘")
+}
+
+func saveTranscriptionSummary(info *SessionInfo, summary string) error {
+	if info == nil || info.Kind != SessionKindTranscription {
+		return errors.New("只能为转写会话保存总结")
+	}
+	return saveSessionAnalysis(info, summary, sessionSummaryName, "总结")
+}
+
+func saveSessionAnalysisResult(info *SessionInfo, content string) error {
+	if info == nil {
+		return errors.New("会话为空")
+	}
+	switch info.Kind {
+	case SessionKindInterview:
+		return saveInterviewReview(info, content)
+	case SessionKindTranscription:
+		return saveTranscriptionSummary(info, content)
+	default:
+		return errors.New("该会话类型不支持 AI 总结或复盘")
+	}
+}
+
+func saveSessionAnalysis(info *SessionInfo, content, fileName, label string) error {
+	if info.Status == SessionStatusRunning {
+		return fmt.Errorf("会话结束后才能生成%s", label)
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return fmt.Errorf("%s内容为空", label)
+	}
+	if strings.TrimSpace(info.Directory) == "" {
+		return errors.New("会话目录为空")
+	}
+	path := filepath.Join(info.Directory, fileName)
+	if err := os.WriteFile(path, []byte(content+"\n"), 0o644); err != nil {
+		return fmt.Errorf("保存%s失败：%w", label, err)
+	}
+
+	updated := *info
+	if info.Kind == SessionKindInterview {
+		updated.ReviewFile = fileName
+	} else {
+		updated.SummaryFile = fileName
+	}
+	if err := writeSessionManifest(updated); err != nil {
+		return err
+	}
+	*info = updated
 	return nil
 }
 
@@ -285,7 +378,9 @@ func sessionKindText(kind SessionKind) string {
 	case SessionKindRecording:
 		return "录音"
 	case SessionKindTranscription:
-		return "实时转写"
+		return "转写"
+	case SessionKindInterview:
+		return "面试"
 	default:
 		return string(kind)
 	}

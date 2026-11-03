@@ -13,6 +13,8 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	fyneDialog "fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/sqweek/dialog"
 )
@@ -36,6 +38,7 @@ type RecorderWin struct {
 	startButton   *widget.Button
 	stopButton    *widget.Button
 	closed        atomic.Bool
+	releaseOnce   sync.Once
 
 	mu            sync.Mutex
 	session       *Session
@@ -60,26 +63,60 @@ type recordSource struct {
 }
 
 func runRecorder() {
+	var (
+		win         *RecorderWin
+		taskClaimed bool
+	)
 	defer func() {
 		if info := recover(); info != nil {
+			if taskClaimed {
+				if win != nil {
+					win.closed.Store(true)
+					win.stopAllAndWait()
+					recorderWindows.Lock()
+					if recorderWindows.active == win {
+						recorderWindows.active = nil
+					}
+					recorderWindows.Unlock()
+				}
+				releaseVoiceTask(recordMenuName)
+			}
 			dialog.Message("%v", info).Title("打开错误").Error()
 		}
 	}()
 
 	recorderWindows.Lock()
-	defer recorderWindows.Unlock()
 	if active := recorderWindows.active; active != nil {
+		recorderWindows.Unlock()
 		active.window.Show()
 		active.window.RequestFocus()
 		return
 	}
+	recorderWindows.Unlock()
+	if activeTask := activeVoiceTask(); activeTask != "" {
+		fyneDialog.ShowInformation(
+			"录音",
+			"当前正在使用“"+activeTask+"”任务，请先结束后再开始录音。",
+			currentMainWin.win,
+		)
+		return
+	}
+	if !acquireVoiceTask(recordMenuName) {
+		fyneDialog.ShowInformation(
+			"录音",
+			"当前已有语音任务，请先结束后再开始录音。",
+			currentMainWin.win,
+		)
+		return
+	}
+	taskClaimed = true
 
 	appSetting, err := currentAppSetting()
 	if err != nil {
 		panic(err)
 	}
 	setting := appSetting.Setting
-	win := &RecorderWin{
+	win = &RecorderWin{
 		saveDir:       setting.sessionRootDir,
 		sessionName:   widget.NewEntry(),
 		durationLabel: widget.NewLabel("时长：--:--:--"),
@@ -89,14 +126,16 @@ func runRecorder() {
 	win.errorLabel.Wrapping = fyne.TextWrapBreak
 	win.setError("")
 	win.window = fyne.CurrentApp().NewWindow(recordWindowTitle)
+	win.window.SetPadded(false)
 	win.sources = []*recordSource{
 		newRecordSource(win, "麦克风", setting.microphoneName,
 			sound_cap.CaptureMicrophone, true, setting.microphoneSelected),
 		newRecordSource(win, "扬声器（系统声音）", setting.speakerName,
 			sound_cap.CaptureSpeaker, false, setting.speakerSelected),
 	}
-	win.window.SetContent(win.makeContent())
-	win.window.Resize(fyne.NewSize(1000, 580))
+	content, windowSize := win.makeContent()
+	win.window.SetContent(content)
+	win.window.Resize(windowSize)
 	win.window.CenterOnScreen()
 	win.window.SetCloseIntercept(func() {
 		win.closed.Store(true)
@@ -106,14 +145,13 @@ func runRecorder() {
 	win.window.SetOnClosed(func() {
 		win.closed.Store(true)
 		win.stopAllAndWait()
-		recorderWindows.Lock()
-		if recorderWindows.active == win {
-			recorderWindows.active = nil
-		}
-		recorderWindows.Unlock()
+		win.release()
 	})
+	recorderWindows.Lock()
 	recorderWindows.active = win
+	recorderWindows.Unlock()
 	win.window.Show()
+	taskClaimed = false
 }
 
 // stopActiveRecorder is called before ffaudio.UnInit during application exit.
@@ -124,10 +162,28 @@ func stopActiveRecorder() {
 	if active != nil {
 		active.closed.Store(true)
 		active.stopAllAndWait()
+		if active.window != nil {
+			fyne.DoAndWait(func() {
+				active.window.SetCloseIntercept(nil)
+				active.window.Close()
+			})
+		}
+		active.release()
 	}
 }
 
-func (w *RecorderWin) makeContent() fyne.CanvasObject {
+func (w *RecorderWin) release() {
+	w.releaseOnce.Do(func() {
+		recorderWindows.Lock()
+		if recorderWindows.active == w {
+			recorderWindows.active = nil
+		}
+		recorderWindows.Unlock()
+		releaseVoiceTask(recordMenuName)
+	})
+}
+
+func (w *RecorderWin) makeContent() (fyne.CanvasObject, fyne.Size) {
 	intro := widget.NewLabel("一次开始同时录制已选音源，分别保存为 16 kHz 单声道 WAV。")
 	intro.Wrapping = fyne.TextWrapBreak
 	saveDir := widget.NewLabel("会话主目录：" + w.saveDir)
@@ -147,7 +203,7 @@ func (w *RecorderWin) makeContent() fyne.CanvasObject {
 		container.NewGridWrap(buttonSize, w.stopButton),
 	))
 
-	content := container.NewVBox(
+	body := container.NewVBox(
 		intro,
 		saveDir,
 		widget.NewSeparator(),
@@ -157,10 +213,26 @@ func (w *RecorderWin) makeContent() fyne.CanvasObject {
 		container.NewGridWithColumns(2, w.sources[0].content(), w.sources[1].content()),
 	)
 	footer := container.NewVBox(widget.NewSeparator(), controls)
-	return container.NewPadded(container.NewBorder(
+	size := recorderWindowSize(body, footer, controls)
+	content := container.NewPadded(container.NewBorder(
 		nil, footer, nil, nil,
-		container.NewVScroll(content),
+		container.NewVScroll(body),
 	))
+	return content, size
+}
+
+func recorderWindowSize(body, footer, controls fyne.CanvasObject) fyne.Size {
+	measurement := container.NewPadded(container.NewBorder(nil, footer, nil, nil, body))
+	size := measurement.MinSize()
+	if size.Width < 960 {
+		size.Width = 960
+	}
+	// Wrapped labels need the target width before their height can be measured.
+	body.Resize(fyne.NewSize(size.Width-2*theme.Padding(), body.MinSize().Height))
+	size.Height = measurement.MinSize().Height
+	visibleGap := theme.Padding() + footer.MinSize().Height - controls.MinSize().Height
+	size.Height += fyne.Max(0, theme.TextSize()-visibleGap)
+	return size
 }
 
 func (w *RecorderWin) selectedSources() []*recordSource {
@@ -283,6 +355,7 @@ func (w *RecorderWin) finishSession() {
 		}
 	}
 	finishErr := session.Finish(status, nil, taskErr)
+	refreshActiveSessionHistory()
 	if w.closed.Load() {
 		return
 	}

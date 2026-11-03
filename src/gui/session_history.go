@@ -1,79 +1,133 @@
 package gui
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
-const sessionHistoryWindowTitle = "会话历史"
 const wavHeaderSize = 44
+
+type sessionHistoryWin struct {
+	window          fyne.Window
+	setting         *appSetting
+	sessions        []SessionInfo
+	list            *widget.List
+	searchEntry     *widget.Entry
+	hint            *widget.Label
+	name            *widget.Label
+	metadata        *widget.Label
+	directory       *widget.Label
+	detailError     *widget.Label
+	recordings      *fyne.Container
+	recordingOpener func(string) error
+	transcript      *widget.Entry
+	jobDescription  *widget.Label
+	review          *widget.Label
+	reviewScroll    *container.Scroll
+	reviewEmpty     *widget.Label
+	reviewHeader    *widget.Label
+	historyTabs     *container.AppTabs
+	transcriptTab   *container.TabItem
+	reviewTab       *container.TabItem
+	jobTab          *container.TabItem
+	details         *fyne.Container
+	deleteButton    *widget.Button
+	reviewButton    *widget.Button
+	reviewActions   *fyne.Container
+	reviewStatus    *widget.Label
+	selected        *SessionInfo
+	reviewCancel    context.CancelFunc
+	reviewing       bool
+	reviewRunID     atomic.Uint64
+}
 
 var sessionHistoryWindows struct {
 	sync.Mutex
 	active *sessionHistoryWin
 }
 
-type sessionHistoryWin struct {
-	window       fyne.Window
-	setting      *appSetting
-	sessions     []SessionInfo
-	list         *widget.List
-	searchEntry  *widget.Entry
-	hint         *widget.Label
-	name         *widget.Label
-	metadata     *widget.Label
-	directory    *widget.Label
-	detailError  *widget.Label
-	recordings   *fyne.Container
-	transcript   *widget.Entry
-	details      *fyne.Container
-	deleteButton *widget.Button
-	selected     *SessionInfo
-}
-
 func runSessionHistory() {
 	sessionHistoryWindows.Lock()
-	defer sessionHistoryWindows.Unlock()
 	if active := sessionHistoryWindows.active; active != nil {
+		sessionHistoryWindows.Unlock()
 		active.window.Show()
 		active.window.RequestFocus()
 		return
 	}
+	sessionHistoryWindows.Unlock()
+
 	setting, err := currentAppSetting()
 	if err != nil {
 		dialog.ShowError(err, currentMainWin.win)
 		return
 	}
-
-	win := &sessionHistoryWin{setting: setting}
-	win.window = fyne.CurrentApp().NewWindow(sessionHistoryWindowTitle)
-	win.window.Resize(fyne.NewSize(1100, 700))
-	win.window.CenterOnScreen()
-	win.buildContent()
-	win.window.SetOnClosed(func() {
+	history := &sessionHistoryWin{setting: setting}
+	history.window = fyne.CurrentApp().NewWindow("会话历史")
+	history.buildContent()
+	history.window.Resize(fyne.NewSize(1100, 700))
+	history.window.CenterOnScreen()
+	history.window.SetOnClosed(func() {
+		history.cancelInterviewReview()
+		history.reviewRunID.Add(1)
 		sessionHistoryWindows.Lock()
-		if sessionHistoryWindows.active == win {
+		if sessionHistoryWindows.active == history {
 			sessionHistoryWindows.active = nil
 		}
 		sessionHistoryWindows.Unlock()
 	})
-	sessionHistoryWindows.active = win
-	win.searchSessions()
-	win.window.Show()
+
+	sessionHistoryWindows.Lock()
+	if active := sessionHistoryWindows.active; active != nil {
+		sessionHistoryWindows.Unlock()
+		history.window.Close()
+		active.window.Show()
+		active.window.RequestFocus()
+		return
+	}
+	sessionHistoryWindows.active = history
+	sessionHistoryWindows.Unlock()
+
+	history.searchSessions()
+	history.window.Show()
+}
+
+func refreshActiveSessionHistory() {
+	fyne.Do(func() {
+		sessionHistoryWindows.Lock()
+		history := sessionHistoryWindows.active
+		sessionHistoryWindows.Unlock()
+		if history != nil && !history.reviewing {
+			history.searchSessions()
+		}
+	})
+}
+
+func closeActiveSessionHistory() {
+	sessionHistoryWindows.Lock()
+	history := sessionHistoryWindows.active
+	sessionHistoryWindows.Unlock()
+	if history == nil {
+		return
+	}
+	history.cancelInterviewReview()
+	history.reviewRunID.Add(1)
+	history.window.SetCloseIntercept(nil)
+	history.window.Close()
 }
 
 func (w *sessionHistoryWin) buildContent() {
@@ -113,7 +167,14 @@ func (w *sessionHistoryWin) buildContent() {
 	w.name.Wrapping = fyne.TextWrapBreak
 	w.deleteButton = widget.NewButtonWithIcon("删除会话", theme.DeleteIcon(), w.confirmDeleteSession)
 	w.deleteButton.Disable()
-	titleRow := container.NewBorder(nil, nil, nil, w.deleteButton, w.name)
+	w.reviewButton = widget.NewButton("一键生成复盘", w.generateSessionAnalysis)
+	w.reviewButton.Disable()
+	w.reviewButton.Hide()
+	w.reviewStatus = widget.NewLabel("")
+	w.reviewStatus.Wrapping = fyne.TextWrapBreak
+	w.reviewStatus.Hide()
+	w.reviewActions = container.NewHBox(w.reviewButton, w.deleteButton)
+	titleRow := container.NewBorder(nil, nil, nil, w.reviewActions, w.name)
 	w.metadata = widget.NewLabel("")
 	w.metadata.Wrapping = fyne.TextWrapBreak
 	w.directory = widget.NewLabel("")
@@ -127,11 +188,28 @@ func (w *sessionHistoryWin) buildContent() {
 	w.transcript.SetMinRowsVisible(12)
 	w.transcript.SetPlaceHolder("无转写内容")
 	w.transcript.Disable()
+	w.jobDescription = widget.NewLabel("")
+	w.jobDescription.Wrapping = fyne.TextWrapBreak
+	w.jobDescription.Selectable = true
+	w.review = widget.NewLabel("")
+	w.review.Wrapping = fyne.TextWrapBreak
+	w.review.Selectable = true
+	w.reviewScroll = container.NewVScroll(w.review)
+	w.reviewEmpty = widget.NewLabel("面试会话结束后，可以生成 AI 复盘。")
+	w.reviewEmpty.Wrapping = fyne.TextWrapBreak
+	w.reviewEmpty.Importance = widget.LowImportance
+	reviewContent := container.NewStack(w.reviewScroll, w.reviewEmpty)
 	recordingsHeader := widget.NewLabelWithStyle("录音文件", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	transcriptHeader := widget.NewLabelWithStyle("转写结果", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	transcriptPanel := container.NewBorder(transcriptHeader, nil, nil, nil, w.transcript)
+	w.reviewHeader = widget.NewLabelWithStyle("AI 复盘", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	w.transcriptTab = container.NewTabItem("转写", container.NewBorder(transcriptHeader, nil, nil, nil, w.transcript))
+	w.reviewTab = container.NewTabItem("AI 复盘", container.NewBorder(w.reviewHeader, nil, nil, nil, reviewContent))
+	w.jobTab = container.NewTabItem("职位描述", container.NewVScroll(w.jobDescription))
+	w.historyTabs = container.NewAppTabs(w.transcriptTab, w.reviewTab)
+	w.historyTabs.Hide()
 	detailsHeader := container.NewVBox(
 		titleRow,
+		w.reviewStatus,
 		w.metadata,
 		w.directory,
 		w.detailError,
@@ -141,10 +219,12 @@ func (w *sessionHistoryWin) buildContent() {
 		widget.NewSeparator(),
 	)
 
-	w.details = container.NewBorder(detailsHeader, nil, nil, nil, transcriptPanel)
+	w.details = container.NewBorder(detailsHeader, nil, nil, nil, w.historyTabs)
 	split := container.NewHSplit(left, w.details)
 	split.Offset = 0.42
-	w.window.SetContent(split)
+	if w.window != nil {
+		w.window.SetContent(split)
+	}
 }
 
 func sessionHistoryListItem(info SessionInfo) *fyne.Container {
@@ -237,23 +317,34 @@ func (w *sessionHistoryWin) searchSessions() {
 }
 
 func (w *sessionHistoryWin) clearDetails() {
+	w.cancelInterviewReview()
+	w.reviewRunID.Add(1)
 	w.selected = nil
 	w.name.SetText("选择一个会话")
 	w.deleteButton.Disable()
+	w.reviewButton.Hide()
+	w.reviewButton.Disable()
+	w.setReviewStatus("")
 	w.metadata.SetText("")
 	w.directory.SetText("")
 	w.detailError.SetText("")
 	w.recordings.Objects = nil
 	w.recordings.Refresh()
 	w.transcript.SetText("")
+	w.jobDescription.SetText("")
+	w.setReviewText("")
+	w.historyTabs.Hide()
 	w.details.Refresh()
 }
 
 func (w *sessionHistoryWin) showSession(info SessionInfo) {
+	w.cancelInterviewReview()
+	w.reviewRunID.Add(1)
 	defer w.details.Refresh()
 
 	selected := info
 	w.selected = &selected
+	w.configureHistoryTabs(info)
 	w.deleteButton.Enable()
 	w.name.SetText(info.Name)
 	endedAt := info.UpdatedAt
@@ -281,15 +372,7 @@ func (w *sessionHistoryWin) showSession(info SessionInfo) {
 		label := widget.NewLabel(fileName)
 		label.Wrapping = fyne.TextWrapBreak
 		play := widget.NewButtonWithIcon("播放", theme.MediaPlayIcon(), func() {
-			if _, err := os.Stat(path); err != nil {
-				dialog.ShowError(err, w.window)
-				return
-			}
-			uri, err := url.Parse(storage.NewFileURI(path).String())
-			if err == nil {
-				err = fyne.CurrentApp().OpenURL(uri)
-			}
-			if err != nil {
+			if err := w.playRecording(path); err != nil {
 				dialog.ShowError(err, w.window)
 			}
 		})
@@ -306,15 +389,336 @@ func (w *sessionHistoryWin) showSession(info SessionInfo) {
 	w.recordings.Refresh()
 
 	w.transcript.SetText("")
-	if info.TranscriptFile == "" {
-		return
+	w.jobDescription.SetText("")
+	if info.TranscriptFile != "" {
+		data, err := os.ReadFile(filepath.Join(info.Directory, filepath.Base(info.TranscriptFile)))
+		if err != nil {
+			w.detailError.SetText("读取转写失败：" + err.Error())
+		} else {
+			w.transcript.SetText(string(data))
+		}
 	}
-	data, err := os.ReadFile(filepath.Join(info.Directory, filepath.Base(info.TranscriptFile)))
+	if info.Kind == SessionKindInterview && info.JobDescriptionFile != "" {
+		job, err := readInterviewReference(filepath.Join(info.Directory, filepath.Base(info.JobDescriptionFile)), "职位描述")
+		if err != nil {
+			w.detailError.SetText(strings.TrimSpace(w.detailError.Text + "\n" + err.Error()))
+		} else {
+			w.jobDescription.SetText(job)
+		}
+	}
+	w.showSessionAnalysis(info)
+}
+
+func openSessionRecording(path string, openFile func(string) error) error {
+	info, err := os.Stat(path)
 	if err != nil {
-		w.detailError.SetText("读取转写失败：" + err.Error())
+		return fmt.Errorf("无法访问录音文件：%w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("录音路径不是普通文件")
+	}
+	if info.Size() <= wavHeaderSize {
+		return errors.New("录音文件没有音频数据")
+	}
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("无法解析录音路径：%w", err)
+	}
+	if err := openFile(absolutePath); err != nil {
+		return fmt.Errorf("无法打开录音，请检查系统默认播放器：%w", err)
+	}
+	return nil
+}
+
+func (w *sessionHistoryWin) playRecording(path string) error {
+	opener := w.recordingOpener
+	if opener == nil {
+		opener = openRecordingFile
+	}
+	return openSessionRecording(path, opener)
+}
+
+func (w *sessionHistoryWin) configureHistoryTabs(info SessionInfo) {
+	kind := info.Kind
+	if kind != SessionKindInterview && kind != SessionKindTranscription {
+		w.historyTabs.Hide()
 		return
 	}
-	w.transcript.SetText(string(data))
+	if kind == SessionKindInterview {
+		w.transcriptTab.Text = "面试对话"
+		w.reviewTab.Text = "AI 复盘"
+		w.reviewHeader.SetText("AI 面试复盘")
+		w.reviewEmpty.SetText("面试会话结束后，可以生成 AI 复盘。")
+	} else {
+		w.transcriptTab.Text = "转写"
+		w.reviewTab.Text = "AI 总结"
+		w.reviewHeader.SetText("AI 总结")
+		w.reviewEmpty.SetText("转写会话结束后，可以生成 AI 总结。")
+	}
+	items := []*container.TabItem{w.transcriptTab, w.reviewTab}
+	if kind == SessionKindInterview && info.JobDescriptionFile != "" {
+		items = append(items, w.jobTab)
+	}
+	w.historyTabs.SetItems(items)
+	w.historyTabs.Select(w.transcriptTab)
+	w.historyTabs.Show()
+}
+
+func analysisLabel(kind SessionKind) string {
+	if kind == SessionKindTranscription {
+		return "总结"
+	}
+	return "复盘"
+}
+
+func (w *sessionHistoryWin) showSessionAnalysis(info SessionInfo) {
+	w.setReviewText("")
+	w.setReviewStatus("")
+	w.reviewButton.Hide()
+	w.reviewButton.Disable()
+	if info.Kind != SessionKindInterview && info.Kind != SessionKindTranscription {
+		w.logInterviewReviewActionState(info, false, "unsupported_kind")
+		return
+	}
+	label := analysisLabel(info.Kind)
+	file := info.ReviewFile
+	if info.Kind == SessionKindTranscription {
+		file = info.SummaryFile
+	}
+	w.reviewButton.Show()
+	w.reviewButton.SetText("一键生成" + label)
+	if info.Status == SessionStatusRunning {
+		w.setReviewStatus("结束会话后可生成" + label)
+		w.logInterviewReviewActionState(info, false, "session_running")
+		return
+	}
+	if info.TranscriptFile == "" {
+		w.setReviewStatus("没有可用于" + label + "的转写记录")
+		w.logInterviewReviewActionState(info, false, "transcript_missing")
+		return
+	}
+
+	w.reviewButton.Enable()
+	if file == "" {
+		w.setReviewStatus("尚未生成" + label)
+		w.logInterviewReviewActionState(info, true, "review_not_generated")
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(info.Directory, filepath.Base(file)))
+	if err != nil {
+		w.setReviewStatus("读取" + label + "失败：" + err.Error())
+		w.logInterviewReviewActionState(info, true, "saved_review_read_failed")
+		return
+	}
+	w.setReviewText(string(data))
+	w.reviewButton.SetText("重新生成" + label)
+	w.setReviewStatus("已保存" + label)
+	w.logInterviewReviewActionState(info, true, "saved_review_loaded")
+}
+
+func (w *sessionHistoryWin) logInterviewReviewActionState(info SessionInfo, enabled bool, reason string) {
+	if w.setting == nil || strings.TrimSpace(w.setting.modelConfigDir) == "" {
+		return
+	}
+	logger, file, err := openInterviewDebugLogger(w.setting.modelConfigDir)
+	if err != nil {
+		log.Printf("log interview review action state: %v", err)
+		return
+	}
+	logger.Printf(
+		"review action state session=%q kind=%q status=%q transcript_available=%t review_available=%t enabled=%t reason=%q",
+		filepath.Base(info.Directory), info.Kind, info.Status,
+		info.TranscriptFile != "", info.ReviewFile != "" || info.SummaryFile != "", enabled, reason,
+	)
+	closeInterviewDebugLog(logger, file)
+}
+
+func (w *sessionHistoryWin) setReviewStatus(text string) {
+	w.reviewStatus.SetText(text)
+	if text == "" {
+		w.reviewStatus.Hide()
+	} else {
+		w.reviewStatus.Show()
+	}
+	if w.details != nil {
+		w.details.Refresh()
+	}
+}
+
+func (w *sessionHistoryWin) setReviewText(text string) {
+	w.review.SetText(text)
+	if strings.TrimSpace(text) == "" {
+		w.reviewEmpty.Show()
+	} else {
+		w.reviewEmpty.Hide()
+		w.reviewScroll.ScrollToBottom()
+	}
+}
+
+func (w *sessionHistoryWin) generateSessionAnalysis() {
+	if w.reviewing || w.selected == nil {
+		return
+	}
+	info := *w.selected
+	if (info.Kind != SessionKindInterview && info.Kind != SessionKindTranscription) ||
+		info.Status == SessionStatusRunning || info.TranscriptFile == "" {
+		return
+	}
+	label := analysisLabel(info.Kind)
+	if w.setting.modelConfigDir == "" {
+		w.setting.modelConfigDir = fyne.CurrentApp().Storage().RootURI().Path()
+	}
+	logger, logFile, err := openInterviewDebugLogger(w.setting.modelConfigDir)
+	if err != nil {
+		w.setReviewStatus("打开诊断日志失败：" + err.Error())
+		return
+	}
+	keepLogOpen := true
+	defer func() {
+		if keepLogOpen {
+			closeInterviewDebugLog(logger, logFile)
+		}
+	}()
+	logger.Printf(
+		"review requested session=%q status=%q transcript_file=%q",
+		filepath.Base(info.Directory), info.Status, filepath.Base(info.TranscriptFile),
+	)
+	failPreflight := func(stage string, err error) {
+		logger.Printf("review preflight failed stage=%s error=%v", stage, err)
+		w.setReviewStatus(label + "准备失败：" + err.Error())
+	}
+	transcriptPath := filepath.Join(info.Directory, filepath.Base(info.TranscriptFile))
+	transcript, err := os.ReadFile(transcriptPath)
+	if err != nil {
+		failPreflight("read_transcript", err)
+		return
+	}
+	if strings.TrimSpace(string(transcript)) == "" {
+		failPreflight("empty_transcript", errors.New("转写记录为空"))
+		return
+	}
+	transcriptChars := len([]rune(string(transcript)))
+	logger.Printf("review transcript loaded chars=%d", transcriptChars)
+	if err := w.setting.reloadModelConfig(); err != nil {
+		failPreflight("load_model_config", err)
+		return
+	}
+	config := w.setting.modelConfig
+	if err := config.validate(); err != nil {
+		failPreflight("validate_model_config", err)
+		return
+	}
+	model, err := newChatCompletionModel(config)
+	if err != nil {
+		failPreflight("initialize_model", err)
+		return
+	}
+	model.debugLog = logger
+	messages := buildSessionAnalysisMessages(info.Kind, string(transcript))
+	if info.Kind == SessionKindInterview && info.JobDescriptionFile != "" {
+		job, err := readInterviewReference(filepath.Join(info.Directory, filepath.Base(info.JobDescriptionFile)), "职位描述")
+		if err != nil {
+			failPreflight("read_job_description", err)
+			return
+		}
+		messages = buildInterviewReviewMessagesWithJob(string(transcript), job)
+	}
+	logger.Printf("review generation started model=%q transcript_chars=%d", model.model, transcriptChars)
+	ctx, cancel := context.WithTimeout(context.Background(), interviewReviewTimeout)
+	runID := w.reviewRunID.Add(1)
+	w.reviewCancel = cancel
+	w.reviewing = true
+	w.reviewButton.Disable()
+	w.setReviewStatus("正在分析转写记录…")
+	w.setReviewText("")
+	w.historyTabs.Select(w.historyTabs.Items[1])
+	w.details.Refresh()
+	logger.Printf("review request prepared messages=%d input_chars=%d", len(messages), len([]rune(messages[1].content)))
+	keepLogOpen = false
+	go func() {
+		startedAt := time.Now()
+		var review strings.Builder
+		err := streamAndSaveSessionAnalysis(ctx, model, &info, messages, func() bool {
+			return runID == w.reviewRunID.Load()
+		}, func() {
+			fyne.Do(func() {
+				if runID == w.reviewRunID.Load() {
+					w.setReviewStatus("模型正在分析转写记录…")
+				}
+			})
+		}, func(token string) {
+			review.WriteString(token)
+			content := review.String()
+			fyne.Do(func() {
+				if runID == w.reviewRunID.Load() {
+					w.setReviewText(content)
+				}
+			})
+		})
+		content := strings.TrimSpace(review.String())
+		logger.Printf(
+			"review finished duration=%s answer_chars=%d error=%v",
+			time.Since(startedAt).Round(time.Millisecond), len([]rune(content)), err,
+		)
+		cancel()
+		closeInterviewDebugLog(logger, logFile)
+		fyne.Do(func() {
+			if runID != w.reviewRunID.Load() {
+				return
+			}
+			w.reviewCancel = nil
+			w.reviewing = false
+			w.reviewButton.Enable()
+			if err != nil {
+				w.setReviewStatus(label + "生成失败：" + err.Error())
+				return
+			}
+			w.selected = &info
+			for index := range w.sessions {
+				if w.sessions[index].Directory == info.Directory {
+					w.sessions[index] = info
+					break
+				}
+			}
+			w.list.Refresh()
+			w.reviewButton.SetText("重新生成" + label)
+			w.setReviewStatus(label + "已保存")
+		})
+	}()
+}
+
+func streamAndSaveSessionAnalysis(
+	ctx context.Context,
+	model interviewAnswerModel,
+	info *SessionInfo,
+	messages []interviewChatMessage,
+	isCurrent func() bool,
+	onThinking func(),
+	onToken func(string),
+) error {
+	var content strings.Builder
+	err := model.streamAnswer(ctx, messages, onThinking, func(token string) {
+		content.WriteString(token)
+		onToken(token)
+	})
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !isCurrent() {
+		return context.Canceled
+	}
+	return saveSessionAnalysisResult(info, content.String())
+}
+
+func (w *sessionHistoryWin) cancelInterviewReview() {
+	if w.reviewCancel != nil {
+		w.reviewCancel()
+		w.reviewCancel = nil
+	}
+	w.reviewing = false
 }
 
 func (w *sessionHistoryWin) confirmDeleteSession() {
@@ -324,7 +728,7 @@ func (w *sessionHistoryWin) confirmDeleteSession() {
 	info := *w.selected
 	dialog.ShowConfirm(
 		"删除会话",
-		fmt.Sprintf("确定删除会话“%s”及其录音和转写文件吗？此操作不可恢复。", info.Name),
+		fmt.Sprintf("确定删除会话“%s”及其录音、转写、总结或复盘文件吗？此操作不可恢复。", info.Name),
 		func(confirm bool) {
 			if !confirm {
 				return

@@ -6,6 +6,7 @@ require (
 	fyne.io/fyne/v2 v2.8.2
 	github.com/gen2brain/malgo v0.11.27
 	github.com/realzhangm/xaux v0.0.0-20261102134721-d19956fae13d
+	github.com/sashabaranov/go-openai v1.43.0
 	github.com/sqweek/dialog v0.0.0-20260123140253-64c163d53aac
 	golang.org/x/sys v0.49.0
 )

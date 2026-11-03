@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -32,6 +33,56 @@ type asrSoundCap struct {
 	writeListIndex int
 	isMicrophone   bool
 	target         asrResultTarget
+
+	asrResultMu    sync.Mutex
+	lastASRResult  asrResultSnapshot
+	hasASRResult   bool
+	lastASREventAt time.Time
+}
+
+type asrResultSnapshot struct {
+	typeName string
+	index    int
+	text     string
+	interim  bool
+}
+
+func (a *asrSoundCap) acceptASRResult(response *x.AllResponse) (bool, time.Duration) {
+	if a == nil || response == nil {
+		return false, 0
+	}
+
+	a.asrResultMu.Lock()
+	defer a.asrResultMu.Unlock()
+
+	now := time.Now()
+	interval := time.Duration(0)
+	if !a.lastASREventAt.IsZero() {
+		interval = now.Sub(a.lastASREventAt)
+	}
+	a.lastASREventAt = now
+
+	if response.Type == x.TypeSentenceStart {
+		a.hasASRResult = false
+		return true, interval
+	}
+
+	snapshot := asrResultSnapshot{
+		typeName: response.Type,
+		index:    response.Result.Index,
+		text:     response.Result.Result,
+		interim:  response.Result.Interim,
+	}
+	if a.hasASRResult && a.lastASRResult == snapshot {
+		return false, interval
+	}
+	a.lastASRResult = snapshot
+	a.hasASRResult = true
+	return true, interval
+}
+
+func asrResponseIsFinal(response *x.AllResponse) bool {
+	return response != nil && response.Type == x.TypeSentenceEnd
 }
 
 func (a *asrSoundCap) onResult(response *x.AllResponse) error {
@@ -139,6 +190,24 @@ func stopASRSoundCaps(captures []*asrSoundCap) {
 }
 
 func runRealTimeTrans() {
+	activeSpeech.Lock()
+	transcriber := activeSpeech.window
+	activeSpeech.Unlock()
+	if transcriber != nil {
+		if transcriber.window != nil {
+			transcriber.window.Show()
+			transcriber.window.RequestFocus()
+		}
+		return
+	}
+	if activeTask := activeVoiceTask(); activeTask != "" {
+		fyneDialog.ShowInformation(
+			"转写",
+			"当前正在使用“"+activeTask+"”任务，请先结束后再开始转写。",
+			currentMainWin.win,
+		)
+		return
+	}
 	nameEntry := widget.NewEntry()
 	nameEntry.SetPlaceHolder("留空则使用当前时间")
 	nameEntryContainer := container.NewGridWrap(
@@ -146,7 +215,7 @@ func runRealTimeTrans() {
 		nameEntry,
 	)
 	nameDialog := fyneDialog.NewForm(
-		"新建实时转写会话",
+		"新建转写会话",
 		"开始",
 		"取消",
 		[]*widget.FormItem{widget.NewFormItem("会话名称", nameEntryContainer)},
@@ -199,7 +268,13 @@ func startRealTimeTrans(requestedName string) {
 	}
 	window = newSpeechRTTrans()
 	if window == nil {
-		panic("实时转写窗口已经打开")
+		activeTask := activeVoiceTask()
+		fyneDialog.ShowInformation(
+			"转写",
+			"当前正在使用“"+activeTask+"”任务，请先结束后再开始转写。",
+			currentMainWin.win,
+		)
+		return
 	}
 	session, err = CreateSession(setting.sessionRootDir, requestedName, SessionKindTranscription)
 	if err != nil {
