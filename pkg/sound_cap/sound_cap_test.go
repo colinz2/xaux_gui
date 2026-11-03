@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"xaux_gui/pkg/ffaudio"
 )
@@ -119,6 +120,46 @@ func TestRecordingOnlyWrite(t *testing.T) {
 	}
 	if len(data) != 44+len(payload) || !bytes.Equal(data[44:], payload) {
 		t.Fatalf("unexpected WAV payload: length=%d data=%v", len(data), data)
+	}
+}
+
+func TestRecordingSegmentTracksStartAndResume(t *testing.T) {
+	recordPath := filepath.Join(t.TempDir(), "segments.wav")
+	var segments []RecordingSegment
+	capture, err := NewSoundCap(context.Background(), &Config{
+		Mode: CaptureMicrophone, RecordFilePath: recordPath,
+		OnRecordingSegment: func(segment RecordingSegment) { segments = append(segments, segment) },
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	format := ffaudio.PCMFormat{SampleRate: 16000, Channels: 1, Format: ffaudio.FormatInt16}
+	capture.converter, err = ffaudio.NewPCMConverter(format, format)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture.recording, err = newWAVWriter(recordPath, 16000, 1, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture.transitionState(StateCreated, StateStarting)
+	capture.transitionState(StateStarting, StateRunning)
+	before := time.Now()
+	for i := 0; i < 2; i++ {
+		if _, err := capture.Write([]byte{1, 0, 2, 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	capture.ioMu.Lock()
+	capture.recordingSegmentPending = true
+	capture.ioMu.Unlock()
+	if _, err := capture.Write([]byte{3, 0}); err != nil {
+		t.Fatal(err)
+	}
+	capture.Close()
+	if len(segments) != 2 || segments[0].Frame != 0 || segments[1].Frame != 4 ||
+		segments[0].StartedAt.Before(before.Add(-time.Millisecond)) || segments[1].StartedAt.Before(segments[0].StartedAt) {
+		t.Fatalf("unexpected recording segments: %+v", segments)
 	}
 }
 

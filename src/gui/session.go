@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"xaux_gui/pkg/sound_cap"
 )
 
 const (
@@ -21,6 +23,7 @@ const (
 	sessionInterviewReviewName = "interview_review.txt"
 	sessionSummaryName         = "summary.txt"
 	sessionJobDescriptionName  = "job_description.txt"
+	sessionMixedRecordingName  = "mixed.wav"
 )
 
 type SessionStatus string
@@ -47,6 +50,7 @@ type SessionInfo struct {
 	Status             SessionStatus `json:"status"`
 	Kind               SessionKind   `json:"kind"`
 	Recordings         []string      `json:"recordings,omitempty"`
+	MixedRecording     string        `json:"mixed_recording,omitempty"`
 	TranscriptFile     string        `json:"transcript_file,omitempty"`
 	ReviewFile         string        `json:"review_file,omitempty"`
 	SummaryFile        string        `json:"summary_file,omitempty"`
@@ -62,8 +66,9 @@ type SessionTranscriptEntry struct {
 }
 
 type Session struct {
-	mu   sync.Mutex
-	info SessionInfo
+	mu                sync.Mutex
+	info              SessionInfo
+	recordingSegments map[string][]sound_cap.RecordingSegment
 }
 
 func CreateSession(rootDir, requestedName string, kind SessionKind) (*Session, error) {
@@ -163,6 +168,15 @@ func (s *Session) AddRecording(fileName string) error {
 	return s.saveManifestLocked()
 }
 
+func (s *Session) recordSegment(fileName string, segment sound_cap.RecordingSegment) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recordingSegments == nil {
+		s.recordingSegments = make(map[string][]sound_cap.RecordingSegment)
+	}
+	s.recordingSegments[fileName] = append(s.recordingSegments[fileName], segment)
+}
+
 func (s *Session) SaveJobDescription(description string) error {
 	description, err := validateInterviewContext(description, &localizedText{key: "reference.job"})
 	if err != nil {
@@ -203,9 +217,25 @@ func (s *Session) Finish(status SessionStatus, transcript []SessionTranscriptEnt
 	}
 
 	var resultErr error
+	if len(s.info.Recordings) > 0 {
+		inputs := make([]sound_cap.RecordingInput, 0, len(s.info.Recordings))
+		for _, fileName := range s.info.Recordings {
+			inputs = append(inputs, sound_cap.RecordingInput{
+				Path:     filepath.Join(s.info.Directory, fileName),
+				Segments: s.recordingSegments[fileName],
+			})
+		}
+		if err := sound_cap.MixRecordings(filepath.Join(s.info.Directory, sessionMixedRecordingName), inputs); err != nil {
+			resultErr = fmt.Errorf("mix session recordings: %w", err)
+			status = SessionStatusFailed
+			s.info.Error = errors.Join(taskErr, resultErr).Error()
+		} else {
+			s.info.MixedRecording = sessionMixedRecordingName
+		}
+	}
 	if transcript != nil {
 		if err := writeSessionTranscript(filepath.Join(s.info.Directory, sessionTranscriptName), transcript); err != nil {
-			resultErr = fmt.Errorf("save session transcript: %w", err)
+			resultErr = errors.Join(resultErr, fmt.Errorf("save session transcript: %w", err))
 			status = SessionStatusFailed
 			if s.info.Error == "" {
 				s.info.Error = err.Error()

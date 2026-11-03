@@ -393,9 +393,9 @@ func (w *sessionHistoryWin) showSession(info SessionInfo) {
 	w.detailsLocale.setLabel(w.directory, "history.directory", map[string]any{"Path": info.Directory})
 	var transcriptErr, jobErr error
 
-	rows := make([]fyne.CanvasObject, 0, len(info.Recordings))
-	for _, recording := range info.Recordings {
-		fileName := filepath.Base(recording)
+	var rows []fyne.CanvasObject
+	if info.MixedRecording != "" {
+		fileName := filepath.Base(info.MixedRecording)
 		path := filepath.Join(info.Directory, fileName)
 		label := widget.NewLabel(fileName)
 		label.Wrapping = fyne.TextWrapBreak
@@ -413,7 +413,7 @@ func (w *sessionHistoryWin) showSession(info SessionInfo) {
 	}
 	if len(rows) == 0 {
 		empty := widget.NewLabel("")
-		w.detailsLocale.setLabel(empty, "history.no_recordings", nil)
+		w.detailsLocale.setLabel(empty, "history.no_mixed_recording", nil)
 		rows = append(rows, empty)
 	}
 	w.recordings.Objects = rows

@@ -2,6 +2,7 @@ package gui
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -12,10 +13,39 @@ import (
 	"testing"
 	"time"
 
+	"xaux_gui/pkg/sound_cap"
+
 	"fyne.io/fyne/v2"
 	fynetest "fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 )
+
+func writeSessionRecording(t *testing.T, session *Session, name string, samples []int16, startedAt time.Time) {
+	t.Helper()
+	data := make([]byte, 44+len(samples)*2)
+	copy(data[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(data[4:8], uint32(len(data)-8))
+	copy(data[8:12], "WAVE")
+	copy(data[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(data[16:20], 16)
+	binary.LittleEndian.PutUint16(data[20:22], 1)
+	binary.LittleEndian.PutUint16(data[22:24], 1)
+	binary.LittleEndian.PutUint32(data[24:28], 16000)
+	binary.LittleEndian.PutUint32(data[28:32], 32000)
+	binary.LittleEndian.PutUint16(data[32:34], 2)
+	binary.LittleEndian.PutUint16(data[34:36], 16)
+	copy(data[36:40], "data")
+	binary.LittleEndian.PutUint32(data[40:44], uint32(len(samples)*2))
+	for i, sample := range samples {
+		binary.LittleEndian.PutUint16(data[44+i*2:], uint16(sample))
+	}
+	if err := os.WriteFile(filepath.Join(session.Directory(), name), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) > 0 {
+		session.recordSegment(name, sound_cap.RecordingSegment{StartedAt: startedAt})
+	}
+}
 
 func TestSessionUniqueNamesAndPersistence(t *testing.T) {
 	root := t.TempDir()
@@ -37,9 +67,7 @@ func TestSessionUniqueNamesAndPersistence(t *testing.T) {
 	if err := first.AddRecording("microphone.wav"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(first.Directory(), "microphone.wav"), []byte("wav"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeSessionRecording(t, first, "microphone.wav", []int16{100}, time.Now())
 	if err := first.Finish(SessionStatusStopped, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +87,8 @@ func TestSessionUniqueNamesAndPersistence(t *testing.T) {
 		byName[info.Name] = info
 	}
 	stopped := byName[first.Snapshot().Name]
-	if stopped.Status != SessionStatusStopped || len(stopped.Recordings) != 1 || stopped.Recordings[0] != "microphone.wav" {
+	if stopped.Status != SessionStatusStopped || len(stopped.Recordings) != 1 ||
+		stopped.Recordings[0] != "microphone.wav" || stopped.MixedRecording != sessionMixedRecordingName {
 		t.Fatalf("recording metadata was not persisted: %+v", stopped)
 	}
 	failed := byName[second.Snapshot().Name]
@@ -101,6 +130,61 @@ func TestSessionTranscriptAndDefaultName(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].TranscriptFile != sessionTranscriptName {
 		t.Fatalf("transcript metadata was not loaded: %+v", sessions)
+	}
+}
+
+func TestSessionFinishMixesAllSessionKinds(t *testing.T) {
+	for _, kind := range []SessionKind{SessionKindRecording, SessionKindTranscription, SessionKindInterview} {
+		t.Run(string(kind), func(t *testing.T) {
+			root := t.TempDir()
+			session, err := CreateSession(root, "mix", kind)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := time.Now()
+			for _, name := range []string{"microphone.wav", "speaker.wav"} {
+				if err := session.AddRecording(name); err != nil {
+					t.Fatal(err)
+				}
+				writeSessionRecording(t, session, name, []int16{100, -100}, start)
+			}
+			if err := session.Finish(SessionStatusStopped, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			sessions, err := LoadSessions(root)
+			if err != nil || len(sessions) != 1 {
+				t.Fatalf("load sessions: %v, %v", sessions, err)
+			}
+			info := sessions[0]
+			if info.MixedRecording != sessionMixedRecordingName || len(info.Recordings) != 2 {
+				t.Fatalf("unexpected recordings metadata: %+v", info)
+			}
+			for _, name := range append(info.Recordings, info.MixedRecording) {
+				if _, err := os.Stat(filepath.Join(info.Directory, name)); err != nil {
+					t.Fatalf("recording %q not preserved: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSessionFinishReportsMixFailureAndPreservesTranscript(t *testing.T) {
+	session, err := CreateSession(t.TempDir(), "failed-mix", SessionKindTranscription)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.AddRecording("missing.wav"); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Finish(SessionStatusStopped, []SessionTranscriptEntry{{Content: "transcript"}}, nil); err == nil {
+		t.Fatal("missing source did not report a mix failure")
+	}
+	info := session.Snapshot()
+	if info.Status != SessionStatusFailed || info.MixedRecording != "" || info.Error == "" || info.TranscriptFile == "" {
+		t.Fatalf("mix failure was not persisted: %+v", info)
+	}
+	if _, err := os.Stat(filepath.Join(info.Directory, info.TranscriptFile)); err != nil {
+		t.Fatalf("transcript was not preserved: %v", err)
 	}
 }
 
@@ -155,12 +239,8 @@ func TestSessionHistoryWindow(t *testing.T) {
 	if err := session.AddRecording("speaker.wav"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(session.Directory(), "microphone.wav"), make([]byte, wavHeaderSize+2), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(session.Directory(), "speaker.wav"), make([]byte, wavHeaderSize), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeSessionRecording(t, session, "microphone.wav", []int16{100}, time.Now())
+	writeSessionRecording(t, session, "speaker.wav", nil, time.Time{})
 	if err := session.Finish(SessionStatusStopped, []SessionTranscriptEntry{
 		{Timestamp: "2026-01-02 03:04:05", Device: "麦克风", Content: "历史转写内容"},
 	}, nil); err != nil {
@@ -185,29 +265,20 @@ func TestSessionHistoryWindow(t *testing.T) {
 		t.Fatalf("history contains %d sessions, want 1", len(win.sessions))
 	}
 	win.list.Select(0)
-	if win.name.Text != "历史测试" || len(win.recordings.Objects) != 2 {
+	if win.name.Text != "历史测试" || len(win.recordings.Objects) != 1 {
 		t.Fatalf("history details were not populated: %q, %d recordings", win.name.Text, len(win.recordings.Objects))
 	}
 	if win.deleteButton.Disabled() {
 		t.Fatal("delete button should be enabled for the selected session")
 	}
-	for i, row := range win.recordings.Objects {
-		button, ok := row.(*fyne.Container).Objects[1].(*widget.Button)
-		if !ok || button.Icon == nil || button.Text != "播放" {
-			t.Fatalf("recording row has no icon playback button: %#v", row)
-		}
-		if button.Disabled() != (i == 1) {
-			t.Fatalf("recording row %d disabled=%v, want %v", i, button.Disabled(), i == 1)
-		}
-		if i == 0 {
-			fynetest.Tap(button)
-			if openedPath != filepath.Join(session.Directory(), "microphone.wav") {
-				t.Fatalf("playback opened %q, want the selected recording", openedPath)
-			}
-		}
+	row := win.recordings.Objects[0]
+	button, ok := row.(*fyne.Container).Objects[1].(*widget.Button)
+	if !ok || button.Icon == nil || button.Text != "播放" || button.Disabled() {
+		t.Fatalf("mixed recording row has no enabled playback button: %#v", row)
 	}
-	if label := win.recordings.Objects[1].(*fyne.Container).Objects[0].(*widget.Label); !strings.Contains(label.Text, "无音频数据") {
-		t.Fatalf("empty recording is not labeled: %q", label.Text)
+	fynetest.Tap(button)
+	if openedPath != filepath.Join(session.Directory(), sessionMixedRecordingName) {
+		t.Fatalf("playback opened %q, want the mixed recording", openedPath)
 	}
 	if !win.directory.Selectable || !strings.Contains(win.directory.Text, session.Directory()) {
 		t.Fatalf("session directory is not available for selection and copying: selectable=%v text=%q",
@@ -228,6 +299,28 @@ func TestSessionHistoryWindow(t *testing.T) {
 	}
 	if !strings.Contains(win.metadata.Text, "持续时长：00:00:00") {
 		t.Fatalf("history duration was not displayed: %q", win.metadata.Text)
+	}
+}
+
+func TestSessionHistoryDoesNotPlayOldOrFailedMixes(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+	win := &sessionHistoryWin{recordingOpener: func(string) error {
+		t.Fatal("legacy mono recording was opened")
+		return nil
+	}}
+	win.window = app.NewWindow("history")
+	defer win.window.Close()
+	win.buildContent()
+	info := SessionInfo{Name: "old", Status: SessionStatusStopped, Kind: SessionKindRecording,
+		Directory: t.TempDir(), Recordings: []string{"microphone.wav", "speaker.wav"}}
+	win.showSession(info)
+	if len(win.recordings.Objects) != 1 {
+		t.Fatal("legacy session exposed multiple recordings")
+	}
+	label, ok := win.recordings.Objects[0].(*widget.Label)
+	if !ok || !strings.Contains(label.Text, "没有可回放的合并录音") {
+		t.Fatalf("legacy session should have no playback: %#v", win.recordings.Objects[0])
 	}
 }
 

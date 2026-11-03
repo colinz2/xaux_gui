@@ -176,6 +176,7 @@
   "history.play": "Play",
   "history.no_audio": "{{.Name}} (no audio data)",
   "history.no_recordings": "No recordings",
+  "history.no_mixed_recording": "No mixed recording is available for playback",
   "history.read_transcript_failed": "Failed to read transcript: {{.Error}}",
   "history.interview_transcript": "Interview conversation",
   "history.review": "review",

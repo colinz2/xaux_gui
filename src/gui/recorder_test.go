@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"xaux_gui/pkg/sound_cap"
 	"xaux_gui/src/mytheme"
@@ -179,6 +180,7 @@ func TestRecorderSessionGroupsSourcesAndSequencesNames(t *testing.T) {
 			if filepath.Dir(path) != info.Directory {
 				t.Fatalf("%s output is outside the shared session directory", source.title)
 			}
+			writeSessionRecording(t, session, filepath.Base(path), []int16{100}, time.Now())
 		}
 		if err := session.Finish(SessionStatusStopped, nil, nil); err != nil {
 			t.Fatal(err)
@@ -206,6 +208,7 @@ func TestRecorderRestoresRequestedSessionName(t *testing.T) {
 			}
 			win.sessionName.SetText(session.Snapshot().Name)
 			win.finishSession()
+			waitInterimUI(t, func() bool { return win.sessionName.Text == requestedName })
 			if win.sessionName.Text != requestedName {
 				t.Fatalf("restored name = %q, want %q", win.sessionName.Text, requestedName)
 			}

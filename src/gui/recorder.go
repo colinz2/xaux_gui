@@ -43,6 +43,7 @@ type RecorderWin struct {
 
 	mu            sync.Mutex
 	session       *Session
+	finishing     chan struct{}
 	requestedName string
 	duration      *sessionDurationView
 }
@@ -279,7 +280,7 @@ func (w *RecorderWin) start() {
 		return
 	}
 	w.mu.Lock()
-	active := w.session != nil
+	active := w.session != nil || w.finishing != nil
 	w.mu.Unlock()
 	if active || len(w.selectedSources()) == 0 {
 		return
@@ -355,6 +356,8 @@ func (w *RecorderWin) finishSession() {
 	}
 	requestedName := w.requestedName
 	duration := w.duration
+	done := make(chan struct{})
+	w.finishing = done
 	w.session = nil
 	w.requestedName = ""
 	w.duration = nil
@@ -373,34 +376,46 @@ func (w *RecorderWin) finishSession() {
 			}
 		}
 	}
-	finishErr := session.Finish(status, nil, taskErr)
-	refreshActiveSessionHistory()
-	if w.closed.Load() {
-		return
-	}
-	if duration != nil && w.durationLabel != nil {
-		w.locale.setLabel(w.durationLabel, "common.duration", map[string]any{
-			"Duration": formatSessionDuration(duration.elapsedAt(time.Now())),
-		})
-	}
-
-	w.sessionName.SetText(requestedName)
-	w.sessionName.Enable()
-	if len(w.selectedSources()) > 0 {
-		w.startButton.Enable()
-	}
-	w.stopButton.Disable()
-	if finishErr != nil {
-		w.setLocalizedError("record.save_failed", map[string]any{"Error": finishErr})
-	} else if taskErr != nil {
-		w.setLocalizedError("record.source_error", func() any {
-			key := "record.speaker"
-			if failedSource.isMicrophone {
-				key = "record.microphone"
+	go func() {
+		finishErr := session.Finish(status, nil, taskErr)
+		w.mu.Lock()
+		if w.finishing == done {
+			w.finishing = nil
+		}
+		w.mu.Unlock()
+		close(done)
+		fyne.Do(func() {
+			refreshActiveSessionHistory()
+			if w.closed.Load() {
+				if finishErr != nil {
+					log.Printf("finish recording session: %v", finishErr)
+				}
+				return
 			}
-			return map[string]any{"Source": tr(key), "Error": failedSource.lastError()}
+			if duration != nil && w.durationLabel != nil {
+				w.locale.setLabel(w.durationLabel, "common.duration", map[string]any{
+					"Duration": formatSessionDuration(duration.elapsedAt(time.Now())),
+				})
+			}
+			w.sessionName.SetText(requestedName)
+			w.sessionName.Enable()
+			if len(w.selectedSources()) > 0 {
+				w.startButton.Enable()
+			}
+			w.stopButton.Disable()
+			if finishErr != nil {
+				w.setLocalizedError("record.save_failed", map[string]any{"Error": finishErr})
+			} else if taskErr != nil {
+				w.setLocalizedError("record.source_error", func() any {
+					key := "record.speaker"
+					if failedSource.isMicrophone {
+						key = "record.microphone"
+					}
+					return map[string]any{"Source": tr(key), "Error": failedSource.lastError()}
+				})
+			}
 		})
-	}
+	}()
 }
 
 func (w *RecorderWin) setError(text string) {
@@ -433,6 +448,12 @@ func (w *RecorderWin) stopAllAndWait() {
 	}
 	wg.Wait()
 	w.finishSession()
+	w.mu.Lock()
+	done := w.finishing
+	w.mu.Unlock()
+	if done != nil {
+		<-done
+	}
 }
 
 func newRecordSource(parent *RecorderWin, title, deviceName string,
@@ -530,10 +551,16 @@ func (s *recordSource) start(path string) error {
 	s.setError("")
 	s.setStatus("common.starting")
 	var capture *sound_cap.SoundCap
+	s.parent.mu.Lock()
+	session := s.parent.session
+	s.parent.mu.Unlock()
 	config := &sound_cap.Config{
 		DeviceName:     s.deviceName,
 		Mode:           s.mode,
 		RecordFilePath: path,
+		OnRecordingSegment: func(segment sound_cap.RecordingSegment) {
+			session.recordSegment(filepath.Base(path), segment)
+		},
 		// No ProxyAddr: direct recording must not require an ASR service.
 		OnError: func(err error) {
 			s.onError(capture, err)

@@ -1132,6 +1132,11 @@ func (s *interviewAssistant) shutdown() {
 			}
 			if err := s.session.Finish(status, entries, runErr); err != nil {
 				log.Printf("finish interview session: %v", err)
+				fyne.Do(func() {
+					if currentMainWin != nil && !currentMainWin.quitting.Load() {
+						showLocalizedError(err, currentMainWin.win)
+					}
+				})
 			}
 			s.debugf("session finished session=%d status=%q", s.traceSession, status)
 			s.closeDebugLog()

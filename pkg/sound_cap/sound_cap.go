@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"xaux_gui/pkg/ffaudio"
 
@@ -52,9 +54,15 @@ type Config struct {
 	Channels      int
 	BitsPerSample int
 
-	BufferLengthMsec int
-	OnError          func(error)
-	OnStateChange    func(State)
+	BufferLengthMsec   int
+	OnError            func(error)
+	OnStateChange      func(State)
+	OnRecordingSegment func(RecordingSegment)
+}
+
+type RecordingSegment struct {
+	Frame     uint64
+	StartedAt time.Time
 }
 
 // SoundCap adapts one ffaudio stream to the existing ASR recording flow.
@@ -66,9 +74,10 @@ type SoundCap struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	asrClient *x.Client
-	converter *ffaudio.PCMConverter
-	recording *wavWriter
+	asrClient               *x.Client
+	converter               *ffaudio.PCMConverter
+	recording               *wavWriter
+	recordingSegmentPending bool
 
 	audioMu sync.RWMutex
 	audio   *ffaudio.FFAudio
@@ -92,8 +101,9 @@ func NewSoundCap(ctx context.Context, config *Config, asrCb x.AsrResultCallBack)
 	}
 
 	sc := &SoundCap{
-		Config:        *config,
-		startDoneChan: make(chan error, 1),
+		Config:                  *config,
+		startDoneChan:           make(chan error, 1),
+		recordingSegmentPending: true,
 	}
 	if sc.SampleRate == 0 {
 		sc.SampleRate = 16000
@@ -203,6 +213,7 @@ func (s *SoundCap) Write(p []byte) (int, error) {
 	if s.converter == nil {
 		return 0, fmt.Errorf("PCM converter is not initialized")
 	}
+	receivedAt := time.Now()
 	converted, err := s.converter.Convert(p)
 	if err != nil {
 		return 0, fmt.Errorf("convert PCM: %w", err)
@@ -216,8 +227,21 @@ func (s *SoundCap) Write(p []byte) (int, error) {
 		}
 	}
 	if s.recording != nil {
-		if _, err := s.recording.Write(converted); err != nil {
+		frame := s.recording.dataBytes / uint64(s.Channels*s.BitsPerSample/8)
+		n, err := s.recording.Write(converted)
+		if err != nil {
 			return 0, fmt.Errorf("write recording: %w", err)
+		}
+		if n != len(converted) {
+			return 0, fmt.Errorf("write recording: %w", io.ErrShortWrite)
+		}
+		if s.recordingSegmentPending {
+			s.recordingSegmentPending = false
+			if s.OnRecordingSegment != nil {
+				frames := len(converted) / (s.Channels * s.BitsPerSample / 8)
+				startedAt := receivedAt.Add(-time.Duration(int64(frames) * int64(time.Second) / int64(s.SampleRate)))
+				s.OnRecordingSegment(RecordingSegment{Frame: frame, StartedAt: startedAt})
+			}
 		}
 	}
 	return len(p), nil
@@ -349,6 +373,7 @@ func (s *SoundCap) Pause() error {
 
 	s.ioMu.Lock()
 	var err error
+	s.recordingSegmentPending = true
 	if s.asrClient != nil {
 		err = s.asrClient.End()
 	}

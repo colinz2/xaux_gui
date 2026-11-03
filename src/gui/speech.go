@@ -106,6 +106,7 @@ func newASRSoundCap(
 	proxyAddr, deviceName, savePath string,
 	isMicrophone bool,
 	onError func(error),
+	onRecordingSegment func(sound_cap.RecordingSegment),
 ) (*asrSoundCap, error) {
 	mode := sound_cap.CaptureSpeaker
 	sourceName := "speaker"
@@ -120,11 +121,12 @@ func newASRSoundCap(
 		isMicrophone:   isMicrophone,
 	}
 	capture, err := sound_cap.NewSoundCap(ctx, &sound_cap.Config{
-		ProxyAddr:      proxyAddr,
-		DeviceName:     deviceName,
-		Mode:           mode,
-		RecordFilePath: savePath,
-		OnError:        onError,
+		ProxyAddr:          proxyAddr,
+		DeviceName:         deviceName,
+		Mode:               mode,
+		RecordFilePath:     savePath,
+		OnError:            onError,
+		OnRecordingSegment: onRecordingSegment,
 	}, result.onResult)
 	if err != nil {
 		return nil, fmt.Errorf("create %s capture: %w", sourceName, err)
@@ -160,6 +162,7 @@ func newASRSoundCaps(setting *Setting, session *Session, onError func(error)) ([
 		}
 		capture, err := newASRSoundCap(
 			context.Background(), setting.proxyAddr, deviceName, path, isMicrophone, onError,
+			func(segment sound_cap.RecordingSegment) { session.recordSegment(filepath.Base(path), segment) },
 		)
 		if err != nil {
 			return err
@@ -317,6 +320,11 @@ func startRealTimeTrans(requestedName string) {
 			}
 			if err := session.Finish(status, transcript, runErr); err != nil {
 				log.Printf("finish transcription session: %v", err)
+				fyne.Do(func() {
+					if currentMainWin != nil && !currentMainWin.quitting.Load() {
+						showLocalizedError(err, currentMainWin.win)
+					}
+				})
 			}
 		},
 		func() error {

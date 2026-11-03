@@ -176,6 +176,7 @@
   "history.play": "播放",
   "history.no_audio": "{{.Name}}（无音频数据）",
   "history.no_recordings": "无录音文件",
+  "history.no_mixed_recording": "没有可回放的合并录音",
   "history.read_transcript_failed": "读取转写失败：{{.Error}}",
   "history.interview_transcript": "面试对话",
   "history.review": "复盘",
