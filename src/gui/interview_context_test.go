@@ -107,7 +107,7 @@ func TestInterviewJobDescriptionSizeLimit(t *testing.T) {
 	if err := session.SaveJobDescription(maximum); err != nil {
 		t.Fatalf("maximum-sized job description rejected: %v", err)
 	}
-	loaded, err := readInterviewReference(filepath.Join(session.Directory(), sessionJobDescriptionName), "职位描述")
+	loaded, err := readInterviewReference(filepath.Join(session.Directory(), sessionJobDescriptionName), &localizedText{key: "reference.job"})
 	if err != nil || loaded != maximum {
 		t.Fatalf("maximum-sized description did not round-trip: length=%d err=%v", len(loaded), err)
 	}

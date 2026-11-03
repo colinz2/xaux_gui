@@ -7,15 +7,25 @@ import (
 
 type localizedDiagnosticError struct {
 	message    string
+	messageKey string
+	data       any
 	diagnostic string
 	cause      error
 }
 
 func (e *localizedDiagnosticError) Error() string {
-	if e.cause == nil {
-		return e.message
+	message := e.message
+	if e.messageKey != "" {
+		message = (&localizedText{key: e.messageKey, data: e.data}).text()
 	}
-	return e.message + "：" + e.cause.Error()
+	if e.cause == nil {
+		return message
+	}
+	return trData("common.error_cause", map[string]any{"Message": message, "Cause": e.cause.Error()})
+}
+
+func localizedMessageError(key string, data any, diagnostic string, cause error) error {
+	return &localizedDiagnosticError{messageKey: key, data: data, diagnostic: diagnostic, cause: cause}
 }
 
 func (e *localizedDiagnosticError) Unwrap() error {

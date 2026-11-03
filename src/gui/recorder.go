@@ -7,13 +7,13 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"xaux_gui/pkg/sound_cap"
 	"xaux_gui/src/mytheme"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	fyneDialog "fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/sqweek/dialog"
@@ -39,6 +39,7 @@ type RecorderWin struct {
 	stopButton    *widget.Button
 	closed        atomic.Bool
 	releaseOnce   sync.Once
+	locale        *localeBindings
 
 	mu            sync.Mutex
 	session       *Session
@@ -81,7 +82,7 @@ func runRecorder() {
 				}
 				releaseVoiceTask(recordMenuName)
 			}
-			dialog.Message("%v", info).Title("打开错误").Error()
+			dialog.Message("%v", info).Title(tr("common.open_error")).Error()
 		}
 	}()
 
@@ -94,17 +95,17 @@ func runRecorder() {
 	}
 	recorderWindows.Unlock()
 	if activeTask := activeVoiceTask(); activeTask != "" {
-		fyneDialog.ShowInformation(
-			"录音",
-			"当前正在使用“"+activeTask+"”任务，请先结束后再开始录音。",
+		showLocalizedInformation(
+			tr("menu.record"),
+			trData("record.active_task", map[string]any{"Task": voiceTaskDisplayName(activeTask)}),
 			currentMainWin.win,
 		)
 		return
 	}
 	if !acquireVoiceTask(recordMenuName) {
-		fyneDialog.ShowInformation(
-			"录音",
-			"当前已有语音任务，请先结束后再开始录音。",
+		showLocalizedInformation(
+			tr("menu.record"),
+			tr("record.active_generic"),
 			currentMainWin.win,
 		)
 		return
@@ -119,13 +120,16 @@ func runRecorder() {
 	win = &RecorderWin{
 		saveDir:       setting.sessionRootDir,
 		sessionName:   widget.NewEntry(),
-		durationLabel: widget.NewLabel("时长：--:--:--"),
+		durationLabel: widget.NewLabel(trData("common.duration", map[string]any{"Duration": "--:--:--"})),
 		errorLabel:    widget.NewLabel(""),
+		locale:        &localeBindings{},
 	}
-	win.sessionName.SetPlaceHolder("留空则使用当前时间；可自定义本次会话名称")
+	win.locale.add(func() { win.sessionName.SetPlaceHolder(tr("record.session_placeholder")) })
+	win.locale.setLabel(win.durationLabel, "common.duration", map[string]any{"Duration": "--:--:--"})
 	win.errorLabel.Wrapping = fyne.TextWrapBreak
 	win.setError("")
-	win.window = fyne.CurrentApp().NewWindow(recordWindowTitle)
+	win.window = fyne.CurrentApp().NewWindow(tr("menu.record"))
+	win.locale.add(func() { win.window.SetTitle(tr("menu.record")) })
 	win.window.SetPadded(false)
 	win.sources = []*recordSource{
 		newRecordSource(win, "麦克风", setting.microphoneName,
@@ -143,6 +147,7 @@ func runRecorder() {
 		win.window.Close()
 	})
 	win.window.SetOnClosed(func() {
+		win.locale.stop()
 		win.closed.Store(true)
 		win.stopAllAndWait()
 		win.release()
@@ -151,6 +156,7 @@ func runRecorder() {
 	recorderWindows.active = win
 	recorderWindows.Unlock()
 	win.window.Show()
+	win.locale.start()
 	taskClaimed = false
 }
 
@@ -184,14 +190,18 @@ func (w *RecorderWin) release() {
 }
 
 func (w *RecorderWin) makeContent() (fyne.CanvasObject, fyne.Size) {
-	intro := widget.NewLabel("一次开始同时录制已选音源，分别保存为 16 kHz 单声道 WAV。")
+	intro := widget.NewLabel("")
+	w.locale.setLabel(intro, "record.intro", nil)
 	intro.Wrapping = fyne.TextWrapBreak
-	saveDir := widget.NewLabel("会话主目录：" + w.saveDir)
+	saveDir := widget.NewLabel("")
+	w.locale.setLabel(saveDir, "record.session_root", map[string]any{"Path": w.saveDir})
 	saveDir.Wrapping = fyne.TextWrapBreak
 
-	w.startButton = widget.NewButtonWithIcon("开始录音", mytheme.ResBegin, w.start)
+	w.startButton = widget.NewButtonWithIcon("", mytheme.ResBegin, w.start)
+	w.locale.setButton(w.startButton, "record.start", nil)
 	w.startButton.Importance = widget.HighImportance
-	w.stopButton = widget.NewButtonWithIcon("停止录音", mytheme.ResEnd, w.stop)
+	w.stopButton = widget.NewButtonWithIcon("", mytheme.ResEnd, w.stop)
+	w.locale.setButton(w.stopButton, "record.stop", nil)
 	w.stopButton.Importance = widget.DangerImportance
 	w.stopButton.Disable()
 	if len(w.selectedSources()) == 0 {
@@ -203,11 +213,13 @@ func (w *RecorderWin) makeContent() (fyne.CanvasObject, fyne.Size) {
 		container.NewGridWrap(buttonSize, w.stopButton),
 	))
 
+	sessionLabel := widget.NewLabel("")
+	w.locale.setLabel(sessionLabel, "record.session_name", nil)
 	body := container.NewVBox(
 		intro,
 		saveDir,
 		widget.NewSeparator(),
-		container.NewBorder(nil, nil, widget.NewLabel("会话名称"), w.durationLabel, w.sessionName),
+		container.NewBorder(nil, nil, sessionLabel, w.durationLabel, w.sessionName),
 		w.errorLabel,
 		widget.NewSeparator(),
 		container.NewGridWithColumns(2, w.sources[0].content(), w.sources[1].content()),
@@ -276,10 +288,11 @@ func (w *RecorderWin) start() {
 	requestedName := w.sessionName.Text
 	session, paths, err := w.prepareSession(requestedName)
 	if err != nil {
-		w.setError("错误：" + err.Error())
+		w.setLocalizedError("common.error", map[string]any{"Error": err})
 		return
 	}
 	info := session.Snapshot()
+	w.locale.forgetLabel(w.durationLabel)
 	duration := newSessionDurationView(w.durationLabel, info.CreatedAt)
 	w.mu.Lock()
 	w.session = session
@@ -350,11 +363,13 @@ func (w *RecorderWin) finishSession() {
 
 	status := SessionStatusStopped
 	var taskErr error
+	var failedSource *recordSource
 	for _, source := range w.sources {
 		if err := source.lastError(); err != nil {
 			status = SessionStatusFailed
 			if taskErr == nil {
 				taskErr = fmt.Errorf("%s: %w", source.title, err)
+				failedSource = source
 			}
 		}
 	}
@@ -362,6 +377,11 @@ func (w *RecorderWin) finishSession() {
 	refreshActiveSessionHistory()
 	if w.closed.Load() {
 		return
+	}
+	if duration != nil && w.durationLabel != nil {
+		w.locale.setLabel(w.durationLabel, "common.duration", map[string]any{
+			"Duration": formatSessionDuration(duration.elapsedAt(time.Now())),
+		})
 	}
 
 	w.sessionName.SetText(requestedName)
@@ -371,18 +391,30 @@ func (w *RecorderWin) finishSession() {
 	}
 	w.stopButton.Disable()
 	if finishErr != nil {
-		w.setError("错误：保存会话失败：" + finishErr.Error())
+		w.setLocalizedError("record.save_failed", map[string]any{"Error": finishErr})
 	} else if taskErr != nil {
-		w.setError("错误：" + taskErr.Error())
+		w.setLocalizedError("record.source_error", func() any {
+			key := "record.speaker"
+			if failedSource.isMicrophone {
+				key = "record.microphone"
+			}
+			return map[string]any{"Source": tr(key), "Error": failedSource.lastError()}
+		})
 	}
 }
 
 func (w *RecorderWin) setError(text string) {
-	w.errorLabel.SetText(text)
 	if text == "" {
+		w.locale.clearLabel(w.errorLabel)
 		w.errorLabel.Hide()
 		return
 	}
+	w.errorLabel.SetText(text)
+	w.errorLabel.Show()
+}
+
+func (w *RecorderWin) setLocalizedError(key string, data any) {
+	w.locale.setLabel(w.errorLabel, key, data)
 	w.errorLabel.Show()
 }
 
@@ -412,37 +444,35 @@ func newRecordSource(parent *RecorderWin, title, deviceName string,
 		mode:         mode,
 		isMicrophone: isMicrophone,
 		selected:     selected,
-		status:       widget.NewLabel("未录音"),
+		status:       widget.NewLabel(""),
 		errorLabel:   widget.NewLabel(""),
 		filePath:     widget.NewMultiLineEntry(),
 	}
 	s.errorLabel.Wrapping = fyne.TextWrapBreak
 	s.setError("")
+	parent.locale.setLabel(s.status, "record.idle", nil)
 	s.filePath.Wrapping = fyne.TextWrapBreak
 	s.filePath.SetMinRowsVisible(2)
-	s.filePath.SetPlaceHolder("开始录音后显示完整文件路径")
+	placeholder := "record.file_placeholder"
 	s.filePath.Disable()
 	if !selected {
-		s.status.SetText("未选中")
-		s.filePath.SetPlaceHolder("未选中，不生成录音文件")
+		parent.locale.setLabel(s.status, "record.not_selected", nil)
+		placeholder = "record.not_selected_placeholder"
 	}
+	parent.locale.add(func() { s.filePath.SetPlaceHolder(tr(placeholder)) })
 	return s
 }
 
 func (s *recordSource) content() fyne.CanvasObject {
-	deviceName := s.deviceName
-	if deviceName == "" {
-		deviceName = "系统默认（开始时检测）"
-	}
-	saveFileLabel := widget.NewLabel("保存文件：")
+	saveFileLabel := widget.NewLabel("")
+	s.parent.locale.setLabel(saveFileLabel, "record.save_file", nil)
 	if !s.selected {
 		for _, label := range []*widget.Label{s.status, saveFileLabel} {
 			label.Importance = widget.LowImportance
 		}
 	}
-	return widget.NewCard(
-		s.title,
-		"设备："+deviceName,
+	card := widget.NewCard(
+		"", "",
 		container.NewVBox(
 			container.NewBorder(nil, nil, nil, s.status),
 			saveFileLabel,
@@ -450,15 +480,38 @@ func (s *recordSource) content() fyne.CanvasObject {
 			s.errorLabel,
 		),
 	)
+	s.parent.locale.add(func() {
+		title := "record.speaker"
+		if s.isMicrophone {
+			title = "record.microphone"
+		}
+		deviceName := s.deviceName
+		if deviceName == "" {
+			deviceName = tr("record.system_default")
+		}
+		card.SetTitle(tr(title))
+		card.SetSubTitle(trData("record.device", map[string]any{"Name": deviceName}))
+	})
+	return card
 }
 
 func (s *recordSource) setError(text string) {
-	s.errorLabel.SetText(text)
 	if text == "" {
+		s.parent.locale.clearLabel(s.errorLabel)
 		s.errorLabel.Hide()
 		return
 	}
+	s.errorLabel.SetText(text)
 	s.errorLabel.Show()
+}
+
+func (s *recordSource) setLocalizedError(key string, data any) {
+	s.parent.locale.setLabel(s.errorLabel, key, data)
+	s.errorLabel.Show()
+}
+
+func (s *recordSource) setStatus(key string) {
+	s.parent.locale.setLabel(s.status, key, nil)
 }
 
 func (s *recordSource) start(path string) error {
@@ -475,7 +528,7 @@ func (s *recordSource) start(path string) error {
 
 	s.filePath.SetText(path)
 	s.setError("")
-	s.status.SetText("正在启动...")
+	s.setStatus("common.starting")
 	var capture *sound_cap.SoundCap
 	config := &sound_cap.Config{
 		DeviceName:     s.deviceName,
@@ -494,8 +547,8 @@ func (s *recordSource) start(path string) error {
 		s.mu.Lock()
 		s.lastErr = err
 		s.mu.Unlock()
-		s.status.SetText("录音失败")
-		s.setError("错误：" + err.Error())
+		s.setStatus("record.failed")
+		s.setLocalizedError("common.error", map[string]any{"Error": err})
 		return err
 	}
 
@@ -525,7 +578,7 @@ func (s *recordSource) stop() {
 	if state == sound_cap.StateStopped || state == sound_cap.StateError {
 		return
 	}
-	s.status.SetText("正在停止...")
+	s.setStatus("common.stopping")
 	go capture.Close()
 }
 
@@ -561,7 +614,7 @@ func (s *recordSource) onError(capture *sound_cap.SoundCap, err error) {
 
 	fyne.Do(func() {
 		if !s.parent.closed.Load() && s.isCurrent(capture) {
-			s.setError("错误：" + err.Error())
+			s.setLocalizedError("common.error", map[string]any{"Error": err})
 		}
 	})
 }
@@ -576,21 +629,21 @@ func (s *recordSource) onStateChange(capture *sound_cap.SoundCap, state sound_ca
 		}
 		switch state {
 		case sound_cap.StateStarting:
-			s.status.SetText("正在启动...")
+			s.setStatus("common.starting")
 		case sound_cap.StateRunning:
-			s.status.SetText("录音中")
+			s.setStatus("record.active")
 		case sound_cap.StatePaused:
-			s.status.SetText("已暂停")
+			s.setStatus("common.paused")
 		case sound_cap.StateResuming:
-			s.status.SetText("正在恢复...")
+			s.setStatus("common.resuming")
 		case sound_cap.StateStopped:
 			if s.lastError() != nil {
-				s.status.SetText("已停止（有错误）")
+				s.setStatus("common.stopped_error")
 			} else {
-				s.status.SetText("已停止")
+				s.setStatus("common.stopped")
 			}
 		case sound_cap.StateError:
-			s.status.SetText("录音失败")
+			s.setStatus("record.failed")
 		}
 	})
 }
@@ -612,17 +665,17 @@ func (s *recordSource) onRunFinished(capture *sound_cap.SoundCap, runErr error) 
 		if !s.parent.closed.Load() {
 			switch {
 			case capture.State() == sound_cap.StateError:
-				s.status.SetText("录音失败")
+				s.setStatus("record.failed")
 			case lastErr != nil:
-				s.status.SetText("已停止（有错误）")
+				s.setStatus("common.stopped_error")
 			default:
-				s.status.SetText("已停止")
+				s.setStatus("common.stopped")
 			}
 			if capture.State() == sound_cap.StateError && s.errorLabel.Text == "" {
 				if runErr != nil {
-					s.setError("错误：" + runErr.Error())
+					s.setLocalizedError("common.error", map[string]any{"Error": runErr})
 				} else {
-					s.setError("错误：录音失败")
+					s.setLocalizedError("record.error", nil)
 				}
 			}
 		}

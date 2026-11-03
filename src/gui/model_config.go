@@ -110,29 +110,29 @@ func saveModelConfig(rootDir string, config modelConfig) error {
 
 func (c modelConfig) validate() error {
 	if strings.TrimSpace(c.APIKey) == "" {
-		return localizedError("请填写 API Key", "API key is required", nil)
+		return localizedMessageError("model.key_required", nil, "API key is required", nil)
 	}
 	if strings.TrimSpace(c.Model) == "" {
-		return localizedError("请填写默认模型", "default model is required", nil)
+		return localizedMessageError("model.name_required", nil, "default model is required", nil)
 	}
 	parsed, err := url.Parse(strings.TrimSpace(c.BaseURL))
 	if err != nil || parsed.Host == "" {
-		return localizedError("模型 URL 必须是有效的 HTTP 或 HTTPS 地址", "model URL must be a valid HTTP or HTTPS address", nil)
+		return localizedMessageError("model.invalid_url", nil, "model URL must be a valid HTTP or HTTPS address", nil)
 	}
 	scheme := strings.ToLower(parsed.Scheme)
 	if scheme != "https" && scheme != "http" {
-		return localizedError("模型 URL 必须是有效的 HTTP 或 HTTPS 地址", "model URL must be a valid HTTP or HTTPS address", nil)
+		return localizedMessageError("model.invalid_url", nil, "model URL must be a valid HTTP or HTTPS address", nil)
 	}
 	if parsed.User != nil {
-		return localizedError("模型 URL 不能包含用户名或密码", "model URL must not include credentials", nil)
+		return localizedMessageError("model.url_credentials", nil, "model URL must not include credentials", nil)
 	}
 	if scheme == "http" && !isLoopbackHost(parsed.Hostname()) {
-		return localizedError("远程模型服务必须使用 HTTPS；HTTP 仅允许用于本机回环地址", "remote model services require HTTPS; HTTP is only allowed for loopback addresses", nil)
+		return localizedMessageError("model.https_required", nil, "remote model services require HTTPS; HTTP is only allowed for loopback addresses", nil)
 	}
 	if strings.EqualFold(parsed.Hostname(), "ark.cn-beijing.volces.com") &&
 		strings.TrimRight(parsed.Path, "/") == "/api/v3" {
-		return localizedError(
-			fmt.Sprintf("火山引擎 Coding Plan 请使用 %s；/api/v3 不会使用套餐额度，可能产生额外费用", defaultModelBaseURL),
+		return localizedMessageError(
+			"model.coding_plan", map[string]any{"URL": defaultModelBaseURL},
 			fmt.Sprintf("Volcengine Coding Plan requires %s; /api/v3 may incur additional charges", defaultModelBaseURL),
 			nil,
 		)

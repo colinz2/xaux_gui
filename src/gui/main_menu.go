@@ -2,7 +2,6 @@ package gui
 
 import (
 	"fyne.io/fyne/v2"
-	fyneDialog "fyne.io/fyne/v2/dialog"
 )
 
 const (
@@ -21,26 +20,27 @@ func newMainMenu() *fyne.MainMenu {
 	if err != nil {
 		panic(err)
 	}
-	settingsItem := fyne.NewMenuItem("设置", func() {
+	settingsItem := fyne.NewMenuItem(tr("menu.settings"), func() {
 		if err := setting.openConfigurationWindow(); err != nil {
-			fyneDialog.ShowError(err, currentMainWin.win)
+			showLocalizedError(err, currentMainWin.win)
 		}
 	})
-	exitItem := fyne.NewMenuItem("退出", func() {
+	exitItem := fyne.NewMenuItem(tr("menu.exit"), func() {
 		currentMainWin.quitHandle()
 	})
+	exitItem.IsQuit = true
 
-	realTimeTransItem := fyne.NewMenuItem(realTimeTransMenuName, runRealTimeTrans)
-	interviewAssistantItem := fyne.NewMenuItem(interviewAssistantName, runInterviewAssistant)
-	recordItem := fyne.NewMenuItem(recordMenuName, runRecorder)
-	sessionHistoryItem := fyne.NewMenuItem(sessionHistoryItemName, runSessionHistory)
-	versionItem := fyne.NewMenuItem(versionMenuItemName, showVersionInformation)
+	realTimeTransItem := fyne.NewMenuItem(tr("menu.transcription"), runRealTimeTrans)
+	interviewAssistantItem := fyne.NewMenuItem(tr("menu.interview"), runInterviewAssistant)
+	recordItem := fyne.NewMenuItem(tr("menu.record"), runRecorder)
+	sessionHistoryItem := fyne.NewMenuItem(tr("menu.session_history"), runSessionHistory)
+	versionItem := fyne.NewMenuItem(tr("menu.version"), showVersionInformation)
 	githubItem := fyne.NewMenuItem(githubMenuName, openGithubPage)
 
 	return fyne.NewMainMenu(
-		fyne.NewMenu(appSettingName, settingsItem, exitItem),
-		fyne.NewMenu(speechMenuName, recordItem, realTimeTransItem, interviewAssistantItem),
-		fyne.NewMenu(sessionHistoryMenuName, sessionHistoryItem),
-		fyne.NewMenu(aboutMenuName, versionItem, githubItem),
+		fyne.NewMenu(tr("menu.start"), settingsItem, exitItem),
+		fyne.NewMenu(tr("menu.speech"), recordItem, realTimeTransItem, interviewAssistantItem),
+		fyne.NewMenu(tr("menu.history"), sessionHistoryItem),
+		fyne.NewMenu(tr("menu.about"), versionItem, githubItem),
 	)
 }

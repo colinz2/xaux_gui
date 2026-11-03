@@ -46,3 +46,16 @@ func releaseVoiceTask(task string) {
 func activeVoiceTask() string {
 	return voiceTasks.activeTask()
 }
+
+func voiceTaskDisplayName(task string) string {
+	switch task {
+	case recordMenuName:
+		return tr("menu.record")
+	case realTimeTransMenuName:
+		return tr("menu.transcription")
+	case interviewAssistantName:
+		return tr("menu.interview")
+	default:
+		return task
+	}
+}

@@ -76,60 +76,70 @@ func TestRecorderLayoutEmphasizesControlsWithoutEmptyErrorSpace(t *testing.T) {
 func TestRecorderDefaultWindowFitsBody(t *testing.T) {
 	app := fynetest.NewApp()
 	defer app.Quit()
-	for _, currentTheme := range []fyne.Theme{theme.DefaultTheme(), mytheme.MyTheme{}} {
-		app.Settings().SetTheme(currentTheme)
-		for _, saveDir := range []string{t.TempDir(), strings.Repeat("长路径", 90)} {
-			win := &RecorderWin{
-				saveDir:       saveDir,
-				sessionName:   widget.NewEntry(),
-				durationLabel: widget.NewLabel("时长：--:--:--"),
-				errorLabel:    widget.NewLabel(""),
-			}
-			win.setError("")
-			win.sources = []*recordSource{
-				newRecordSource(win, "麦克风", "测试麦克风", sound_cap.CaptureMicrophone, true, true),
-				newRecordSource(win, "扬声器", "测试扬声器", sound_cap.CaptureSpeaker, false, true),
-			}
-			content, size := win.makeContent()
-			window := app.NewWindow("录音")
-			window.SetPadded(false)
-			window.SetContent(content)
-			window.Resize(size)
-			window.Show()
-
-			padded := content.(*fyne.Container)
-			border := padded.Objects[0].(*fyne.Container)
-			var scroll *container.Scroll
-			for _, object := range border.Objects {
-				if value, ok := object.(*container.Scroll); ok {
-					scroll = value
+	t.Cleanup(func() {
+		if err := uiLocale.setLanguage(localeChinese); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, currentLocale := range []string{localeChinese, localeEnglish} {
+		if err := uiLocale.setLanguage(currentLocale); err != nil {
+			t.Fatal(err)
+		}
+		for _, currentTheme := range []fyne.Theme{theme.DefaultTheme(), mytheme.MyTheme{}} {
+			app.Settings().SetTheme(currentTheme)
+			for _, saveDir := range []string{t.TempDir(), strings.Repeat("长路径", 90)} {
+				win := &RecorderWin{
+					saveDir:       saveDir,
+					sessionName:   widget.NewEntry(),
+					durationLabel: widget.NewLabel("时长：--:--:--"),
+					errorLabel:    widget.NewLabel(""),
 				}
+				win.setError("")
+				win.sources = []*recordSource{
+					newRecordSource(win, "麦克风", "测试麦克风", sound_cap.CaptureMicrophone, true, true),
+					newRecordSource(win, "扬声器", "测试扬声器", sound_cap.CaptureSpeaker, false, true),
+				}
+				content, size := win.makeContent()
+				window := app.NewWindow("录音")
+				window.SetPadded(false)
+				window.SetContent(content)
+				window.Resize(size)
+				window.Show()
+
+				padded := content.(*fyne.Container)
+				border := padded.Objects[0].(*fyne.Container)
+				var scroll *container.Scroll
+				for _, object := range border.Objects {
+					if value, ok := object.(*container.Scroll); ok {
+						scroll = value
+					}
+				}
+				if scroll == nil {
+					t.Fatal("recorder body should remain scrollable when resized smaller")
+				}
+				if scroll.Size().Height < scroll.Content.MinSize().Height {
+					t.Fatalf("default recorder body requires scrolling: viewport=%v body minimum=%v window=%v",
+						scroll.Size(), scroll.Content.MinSize(), size)
+				}
+				if scroll.Content.Size().Height > scroll.Size().Height || scroll.Offset.Y != 0 {
+					t.Fatalf("recorder scroll area does not fit: content=%v viewport=%v offset=%v",
+						scroll.Content.Size(), scroll.Size(), scroll.Offset)
+				}
+				body := scroll.Content.(*fyne.Container)
+				last := body.Objects[len(body.Objects)-1]
+				bottom := app.Driver().AbsolutePositionForObject(last).Y + last.Size().Height
+				buttonTop := app.Driver().AbsolutePositionForObject(win.startButton).Y
+				gap := buttonTop - bottom
+				if gap < theme.TextSize()-1 || gap > theme.TextSize()+1 {
+					t.Fatalf("gap between recording body and buttons = %v, want one text line (%v)", gap, theme.TextSize())
+				}
+				window.Resize(fyne.NewSize(size.Width, size.Height-100))
+				scroll.ScrollToBottom()
+				if scroll.Offset.Y <= 0 {
+					t.Fatal("recorder must remain scrollable when the window is made smaller")
+				}
+				window.Close()
 			}
-			if scroll == nil {
-				t.Fatal("recorder body should remain scrollable when resized smaller")
-			}
-			if scroll.Size().Height < scroll.Content.MinSize().Height {
-				t.Fatalf("default recorder body requires scrolling: viewport=%v body minimum=%v window=%v",
-					scroll.Size(), scroll.Content.MinSize(), size)
-			}
-			if scroll.Content.Size().Height > scroll.Size().Height || scroll.Offset.Y != 0 {
-				t.Fatalf("recorder scroll area does not fit: content=%v viewport=%v offset=%v",
-					scroll.Content.Size(), scroll.Size(), scroll.Offset)
-			}
-			body := scroll.Content.(*fyne.Container)
-			last := body.Objects[len(body.Objects)-1]
-			bottom := app.Driver().AbsolutePositionForObject(last).Y + last.Size().Height
-			buttonTop := app.Driver().AbsolutePositionForObject(win.startButton).Y
-			gap := buttonTop - bottom
-			if gap < theme.TextSize()-1 || gap > theme.TextSize()+1 {
-				t.Fatalf("gap between recording body and buttons = %v, want one text line (%v)", gap, theme.TextSize())
-			}
-			window.Resize(fyne.NewSize(size.Width, size.Height-100))
-			scroll.ScrollToBottom()
-			if scroll.Offset.Y <= 0 {
-				t.Fatal("recorder must remain scrollable when the window is made smaller")
-			}
-			window.Close()
 		}
 	}
 }

@@ -201,24 +201,24 @@ func runRealTimeTrans() {
 		return
 	}
 	if activeTask := activeVoiceTask(); activeTask != "" {
-		fyneDialog.ShowInformation(
-			"转写",
-			"当前正在使用“"+activeTask+"”任务，请先结束后再开始转写。",
+		showLocalizedInformation(
+			tr("menu.transcription"),
+			trData("speech.active_task", map[string]any{"Task": voiceTaskDisplayName(activeTask)}),
 			currentMainWin.win,
 		)
 		return
 	}
 	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("留空则使用当前时间")
+	nameEntry.SetPlaceHolder(tr("speech.name_placeholder"))
 	nameEntryContainer := container.NewGridWrap(
 		fyne.NewSize(380, nameEntry.MinSize().Height),
 		nameEntry,
 	)
 	nameDialog := fyneDialog.NewForm(
-		"新建转写会话",
-		"开始",
-		"取消",
-		[]*widget.FormItem{widget.NewFormItem("会话名称", nameEntryContainer)},
+		tr("speech.new_session"),
+		tr("common.start"),
+		tr("common.cancel"),
+		[]*widget.FormItem{widget.NewFormItem(tr("record.session_name"), nameEntryContainer)},
 		func(confirmed bool) {
 			if confirmed {
 				startRealTimeTrans(nameEntry.Text)
@@ -255,7 +255,7 @@ func startRealTimeTrans(requestedName string) {
 			}
 		}
 		if info != nil {
-			dialog.Message("%v", info).Title("打开错误").Error()
+			dialog.Message("%v", info).Title(tr("common.open_error")).Error()
 		}
 	}()
 
@@ -264,14 +264,14 @@ func startRealTimeTrans(requestedName string) {
 		panic(err)
 	}
 	if setting.proxyAddr == "" {
-		panic("Proxy 未启动或地址未配置，请先启动 Proxy 后重试")
+		panic(tr("speech.proxy_missing"))
 	}
 	window = newSpeechRTTrans()
 	if window == nil {
 		activeTask := activeVoiceTask()
-		fyneDialog.ShowInformation(
-			"转写",
-			"当前正在使用“"+activeTask+"”任务，请先结束后再开始转写。",
+		showLocalizedInformation(
+			tr("menu.transcription"),
+			trData("speech.active_task", map[string]any{"Task": voiceTaskDisplayName(activeTask)}),
 			currentMainWin.win,
 		)
 		return
@@ -284,7 +284,7 @@ func startRealTimeTrans(requestedName string) {
 	if err != nil {
 		if errors.Is(err, sound_cap.ErrASRProxyUnavailable) {
 			log.Printf("ASR proxy unavailable: %v", err)
-			panic(fmt.Sprintf("Proxy 未启动，请先启动 Proxy 后重试（%s）", setting.proxyAddr))
+			panic(trData("speech.proxy_unavailable", map[string]any{"Address": setting.proxyAddr}))
 		}
 		panic(err)
 	}

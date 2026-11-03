@@ -16,7 +16,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	fyneDialog "fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/realzhangm/xaux/pkg/x"
@@ -42,6 +41,7 @@ type interviewAnswer struct {
 	content    string
 	errorText  string
 	saved      bool
+	generating bool
 	superseded atomic.Bool
 	status     *widget.Label
 	answer     *widget.Label
@@ -108,6 +108,7 @@ type interviewAssistant struct {
 	paused           bool
 	transitioning    bool
 	stopRequested    bool
+	locale           *localeBindings
 }
 
 func runInterviewAssistant() {
@@ -128,9 +129,9 @@ func runInterviewAssistant() {
 		return
 	}
 	if activeTask := activeVoiceTask(); activeTask != "" {
-		fyneDialog.ShowInformation(
-			"面试",
-			"当前正在使用“"+activeTask+"”任务，请先结束后再开始面试。",
+		showLocalizedInformation(
+			tr("menu.interview"),
+			trData("interview.active_task", map[string]any{"Task": voiceTaskDisplayName(activeTask)}),
 			currentMainWin.win,
 		)
 		return
@@ -140,25 +141,33 @@ func runInterviewAssistant() {
 }
 
 func showInterviewSetup() {
-	window := fyne.CurrentApp().NewWindow("新建面试会话")
+	bindings := &localeBindings{}
+	window := fyne.CurrentApp().NewWindow(tr("interview.new_session"))
+	bindings.add(func() { window.SetTitle(tr("interview.new_session")) })
 	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("留空则使用当前时间")
+	bindings.add(func() { nameEntry.SetPlaceHolder(tr("speech.name_placeholder")) })
 	jobEntry := widget.NewMultiLineEntry()
-	jobEntry.SetPlaceHolder("可粘贴职位描述（可选）")
+	bindings.add(func() { jobEntry.SetPlaceHolder(tr("interview.job_placeholder")) })
 	jobEntry.SetMinRowsVisible(7)
 	jobEntry.Wrapping = fyne.TextWrapBreak
-	information := widget.NewLabel("职位描述保存在会话目录，并用于面试实时回答和复盘。")
+	information := widget.NewLabel("")
+	bindings.setLabel(information, "interview.job_info", nil)
 	information.Wrapping = fyne.TextWrapBreak
-	cancel := widget.NewButton("取消", window.Close)
-	start := widget.NewButton("开始", func() {
+	cancel := widget.NewButton("", window.Close)
+	bindings.setButton(cancel, "common.cancel", nil)
+	start := widget.NewButton("", func() {
 		if err := startInterviewAssistant(nameEntry.Text, jobEntry.Text); err != nil {
-			fyneDialog.ShowError(err, window)
+			showLocalizedError(err, window)
 			return
 		}
 		window.Close()
 	})
+	bindings.setButton(start, "common.start", nil)
+	nameLabel, jobLabel := widget.NewLabel(""), widget.NewLabel("")
+	bindings.setLabel(nameLabel, "record.session_name", nil)
+	bindings.setLabel(jobLabel, "interview.job_label", nil)
 	content := container.NewPadded(container.NewBorder(
-		container.NewVBox(widget.NewLabel("会话名称"), nameEntry, widget.NewLabel("职位描述（JD）")),
+		container.NewVBox(nameLabel, nameEntry, jobLabel),
 		container.NewVBox(information, container.NewHBox(layout.NewSpacer(), cancel, start)),
 		nil, nil, jobEntry,
 	))
@@ -169,6 +178,7 @@ func showInterviewSetup() {
 	activeInterview.setup = window
 	activeInterview.Unlock()
 	window.SetOnClosed(func() {
+		bindings.stop()
 		activeInterview.Lock()
 		if activeInterview.setup == window {
 			activeInterview.setup = nil
@@ -176,6 +186,7 @@ func showInterviewSetup() {
 		activeInterview.Unlock()
 	})
 	window.Show()
+	bindings.start()
 }
 
 func closeInterviewSetup() {
@@ -188,7 +199,7 @@ func closeInterviewSetup() {
 }
 
 func startInterviewAssistant(requestedName, jobDescription string) error {
-	jobDescription, err := validateInterviewContext(jobDescription, "职位描述")
+	jobDescription, err := validateInterviewContext(jobDescription, &localizedText{key: "reference.job"})
 	if err != nil {
 		return err
 	}
@@ -197,10 +208,10 @@ func startInterviewAssistant(requestedName, jobDescription string) error {
 		return err
 	}
 	if !setting.speakerSelected {
-		return errors.New("请先在首页选中扬声器设备")
+		return errors.New(tr("interview.speaker_required"))
 	}
 	if strings.TrimSpace(setting.proxyAddr) == "" {
-		return errors.New("请先配置并启动 ASR Proxy")
+		return errors.New(tr("interview.proxy_required"))
 	}
 	resume, err := loadInterviewResume(setting.resumeEnabled, setting.resumePath)
 	if err != nil {
@@ -211,10 +222,10 @@ func startInterviewAssistant(requestedName, jobDescription string) error {
 		return err
 	}
 	if err := setting.reloadModelConfig(); err != nil {
-		return fmt.Errorf("读取大模型配置失败：%w", err)
+		return localizedMessageError("interview.model_read_failed", nil, "read model configuration failed", err)
 	}
 	if err := setting.modelConfig.validate(); err != nil {
-		return fmt.Errorf("请先在“开始 > 设置”完善大模型配置：%w", err)
+		return localizedMessageError("interview.model_setup_required", nil, "model configuration is incomplete", err)
 	}
 	debugLogger, debugLogFile, err := openInterviewDebugLogger(setting.modelConfigDir)
 	if err != nil {
@@ -223,13 +234,13 @@ func startInterviewAssistant(requestedName, jobDescription string) error {
 	model, err := newChatCompletionModel(setting.modelConfig)
 	if err != nil {
 		closeInterviewDebugLog(debugLogger, debugLogFile)
-		return fmt.Errorf("面试模型配置无效：%w", err)
+		return localizedMessageError("interview.model_invalid", nil, "invalid interview model configuration", err)
 	}
 	model.debugLog = debugLogger
 	assistant := newInterviewAssistant(model, setting.modelConfig)
 	if assistant == nil {
 		closeInterviewDebugLog(debugLogger, debugLogFile)
-		return fmt.Errorf("当前正在使用“%s”任务，请先结束后再开始面试", activeVoiceTask())
+		return errors.New(trData("interview.active_task", map[string]any{"Task": voiceTaskDisplayName(activeVoiceTask())}))
 	}
 	assistant.reference = interviewContext{jobDescription: jobDescription, resume: resume, knowledge: knowledge}
 	assistant.debugLog = debugLogger
@@ -274,8 +285,8 @@ func startInterviewAssistant(requestedName, jobDescription string) error {
 			}
 		}(capture)
 		if err := <-capture.soundCap.StartDone(); err != nil {
-			go assistant.failStartup(localizedError(
-				fmt.Sprintf("启动音源 %q 失败", capture.deviceName),
+			go assistant.failStartup(localizedMessageError(
+				"interview.source_start_failed", map[string]any{"Name": fmt.Sprintf("%q", capture.deviceName)},
 				fmt.Sprintf("start audio source %q failed", capture.deviceName),
 				err,
 			))
@@ -303,17 +314,21 @@ func newInterviewAssistant(model interviewAnswerModel, config modelConfig) *inte
 		questionQueue: make(chan interviewQuestion, 1),
 		checkQueue:    make(chan interviewQuestionCheck, 32),
 		shutdownDone:  make(chan struct{}),
+		locale:        &localeBindings{},
 	}
 }
 
 func (s *interviewAssistant) buildContent() {
 	info := s.session.Snapshot()
 
-	s.status = widget.NewLabel("正在连接音源…")
+	s.status = widget.NewLabel("")
+	s.locale.setLabel(s.status, "interview.connecting", nil)
 	s.status.Importance = widget.SuccessImportance
 	s.duration = newSessionDurationView(widget.NewLabel(""), info.CreatedAt)
-	s.pauseButton = widget.NewButton("暂停", s.togglePause)
-	s.stopButton = widget.NewButtonWithIcon("停止并保存", mytheme.ResEnd, s.shutdown)
+	s.pauseButton = widget.NewButton("", s.togglePause)
+	s.locale.setButton(s.pauseButton, "speech.pause", nil)
+	s.stopButton = widget.NewButtonWithIcon("", mytheme.ResEnd, s.shutdown)
+	s.locale.setButton(s.stopButton, "speech.stop_save", nil)
 	toolbar := container.NewHBox(
 		s.status,
 		layout.NewSpacer(),
@@ -322,30 +337,36 @@ func (s *interviewAssistant) buildContent() {
 		s.stopButton,
 	)
 
-	s.emptyTranscript = widget.NewLabel("等待面试官提问…")
+	s.emptyTranscript = widget.NewLabel("")
+	s.locale.setLabel(s.emptyTranscript, "interview.waiting_question", nil)
 	s.emptyTranscript.Importance = widget.LowImportance
 	s.transcript = container.NewVBox(container.NewCenter(s.emptyTranscript))
 	s.transcriptScroll = container.NewVScroll(s.transcript)
-	s.emptyAnswers = widget.NewLabel("面试官的问题完成转写后，这里会显示关键词和简短思路。")
+	s.emptyAnswers = widget.NewLabel("")
+	s.locale.setLabel(s.emptyAnswers, "interview.waiting_answers", nil)
 	s.emptyAnswers.Wrapping = fyne.TextWrapBreak
 	s.emptyAnswers.Importance = widget.LowImportance
 	s.answerList = container.NewVBox(container.NewCenter(s.emptyAnswers))
 	s.answerScroll = container.NewVScroll(s.answerList)
 
-	transcriptHeader := widget.NewLabelWithStyle("实时对话", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	answerHeader := widget.NewLabelWithStyle("关键词与思路", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	transcriptHeader := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	answerHeader := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	s.locale.setLabel(transcriptHeader, "interview.transcript", nil)
+	s.locale.setLabel(answerHeader, "interview.answers", nil)
 	left := container.NewBorder(container.NewPadded(transcriptHeader), nil, nil, nil, s.transcriptScroll)
 	right := container.NewBorder(container.NewPadded(answerHeader), nil, nil, nil, s.answerScroll)
 	split := container.NewHSplit(left, right)
 	split.Offset = 0.43
 	content := container.NewBorder(container.NewPadded(toolbar), nil, nil, nil, split)
-	s.window = fyne.CurrentApp().NewWindow("面试")
+	s.window = fyne.CurrentApp().NewWindow(tr("menu.interview"))
+	s.locale.add(func() { s.window.SetTitle(tr("menu.interview")) })
 	s.window.SetContent(content)
 	s.window.Resize(fyne.NewSize(1000, 680))
 	s.window.CenterOnScreen()
 	s.window.SetCloseIntercept(s.shutdown)
 	s.window.SetOnClosed(s.release)
 	s.window.Show()
+	s.locale.start()
 }
 
 func (s *interviewAssistant) updateASRResult(capture *asrSoundCap, response *x.AllResponse) {
@@ -456,13 +477,14 @@ func (s *interviewAssistant) newTranscriptRow(turn *interviewTurn, index int) *i
 	title.TextStyle.Bold = true
 	status := widget.NewLabel("")
 	status.Importance = widget.LowImportance
-	generate := widget.NewButton("生成提示", func() {
+	generate := widget.NewButton("", func() {
 		if s.running.Load() && !s.stopping.Load() {
 			s.rows[index].generate.Hide()
-			s.rows[index].status.SetText("手动生成")
+			s.locale.setLabel(s.rows[index].status, "interview.manual", nil)
 			s.enqueueQuestion(index)
 		}
 	})
+	s.locale.setButton(generate, "interview.generate", nil)
 	generate.Hide()
 	content := widget.NewLabel(turn.content)
 	content.Wrapping = fyne.TextWrapBreak
@@ -484,15 +506,15 @@ func (s *interviewAssistant) updateTranscriptRow(index int, turn *interviewTurn)
 
 func (s *interviewAssistant) setTranscriptRowStatus(row *interviewTranscriptRow, turn *interviewTurn) {
 	if turn.final {
-		row.status.SetText("")
+		s.locale.clearLabel(row.status)
 		return
 	}
-	row.status.SetText("识别中")
+	s.locale.setLabel(row.status, "speech.recognizing", nil)
 }
 
 func (s *interviewAssistant) queueQuestionCheck(index int) {
 	row := s.rows[index]
-	row.status.SetText("判断中")
+	s.locale.setLabel(row.status, "interview.checking", nil)
 	check := interviewQuestionCheck{
 		turnIndex: index,
 		messages:  buildInterviewQuestionMessages(s.turns[:index+1]),
@@ -500,9 +522,9 @@ func (s *interviewAssistant) queueQuestionCheck(index int) {
 	select {
 	case s.checkQueue <- check:
 	default:
-		row.status.SetText("判断队列已满")
+		s.locale.setLabel(row.status, "interview.check_queue_full", nil)
 		row.generate.Show()
-		s.setStatus("问题判断队列已满，可在对话中手动生成提示", widget.WarningImportance)
+		s.setStatus("interview.check_queue_full_help", nil, widget.WarningImportance)
 		s.debugf("question check rejected reason=queue_full")
 	}
 }
@@ -511,22 +533,22 @@ func (s *interviewAssistant) applyQuestionDecision(index int, decision interview
 	row := s.rows[index]
 	switch {
 	case err != nil:
-		row.status.SetText("判断失败")
+		s.locale.setLabel(row.status, "interview.check_failed", nil)
 		row.generate.Show()
-		s.setStatus("问题判断失败："+err.Error(), widget.DangerImportance)
+		s.setStatus("interview.check_error", map[string]any{"Error": err}, widget.DangerImportance)
 	case decision == interviewQuestionYes:
 		if s.hasAnswerTurn && index < s.latestAnswerTurn {
-			row.status.SetText("较早问题")
+			s.locale.setLabel(row.status, "interview.older_question", nil)
 			row.generate.Show()
 			return
 		}
-		row.status.SetText("")
+		s.locale.clearLabel(row.status)
 		s.enqueueQuestion(index)
 	case decision == interviewQuestionNo:
-		row.status.SetText("非提问")
+		s.locale.setLabel(row.status, "interview.not_question", nil)
 		row.generate.Show()
 	default:
-		row.status.SetText("无法判断")
+		s.locale.setLabel(row.status, "interview.unknown", nil)
 		row.generate.Show()
 	}
 }
@@ -547,8 +569,8 @@ func (s *interviewAssistant) startQuestionCheckWorker() {
 					return
 				}
 				if errors.Is(err, context.DeadlineExceeded) {
-					err = localizedError(
-						fmt.Sprintf("等待问题判断超过 %s", interviewQuestionTimeout),
+					err = localizedMessageError(
+						"interview.question_timeout", map[string]any{"Duration": interviewQuestionTimeout},
 						fmt.Sprintf("question classification timed out after %s", interviewQuestionTimeout), nil,
 					)
 				}
@@ -579,10 +601,12 @@ func (s *interviewAssistant) enqueueQuestion(turnIndex int) {
 		sequence:  len(s.answers) + 1,
 		timestamp: turn.timestamp,
 		question:  turn.content,
-		status:    widget.NewLabel("排队中"),
-		answer:    widget.NewLabel("等待生成…"),
+		status:    widget.NewLabel(""),
+		answer:    widget.NewLabel(""),
 		error:     widget.NewLabel(""),
 	}
+	s.locale.setLabel(answer.status, "interview.queued", nil)
+	s.locale.setLabel(answer.answer, "interview.waiting_generation", nil)
 	answer.answer.Wrapping = fyne.TextWrapBreak
 	answer.answer.Selectable = true
 	answer.error.Wrapping = fyne.TextWrapBreak
@@ -590,16 +614,19 @@ func (s *interviewAssistant) enqueueQuestion(turnIndex int) {
 	questionLabel := widget.NewLabel(turn.content)
 	questionLabel.Wrapping = fyne.TextWrapBreak
 	questionLabel.Selectable = true
+	hintLabel := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	s.locale.setLabel(hintLabel, "interview.hint", nil)
 	header := container.NewHBox(
-		widget.NewLabelWithStyle("提示", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		hintLabel,
 		layout.NewSpacer(),
 		answer.status,
 	)
 	card := widget.NewCard(
-		"问题",
+		tr("interview.question"),
 		turn.timestamp,
 		container.NewVBox(questionLabel, widget.NewSeparator(), header, answer.answer, answer.error),
 	)
+	s.locale.add(func() { card.SetTitle(tr("interview.question")) })
 	if len(s.answers) == 0 {
 		s.answerList.Objects = nil
 	} else {
@@ -626,8 +653,8 @@ func (s *interviewAssistant) enqueueQuestion(turnIndex int) {
 	select {
 	case s.questionQueue <- question:
 	default:
-		answer.status.SetText("队列已满")
-		answer.error.SetText("待生成的问题过多；请停止并保存后重新开始。")
+		s.locale.setLabel(answer.status, "interview.queue_full", nil)
+		s.locale.setLabel(answer.error, "interview.queue_full_help", nil)
 		s.debugf("question rejected id=%d reason=queue_full", answer.sequence)
 	}
 }
@@ -680,11 +707,12 @@ func (s *interviewAssistant) markAnswerSuperseded(answer *interviewAnswer) {
 		return
 	}
 	answer.superseded.Store(true)
-	answer.status.SetText("已由新问题替代")
+	answer.generating = false
+	s.locale.setLabel(answer.status, "interview.superseded", nil)
 	answer.status.Importance = widget.WarningImportance
 	if answer.content != "" && !answer.saved {
 		answer.errorText = "新问题到达，回答未完成"
-		answer.error.SetText(answer.errorText)
+		s.locale.setLabel(answer.error, "interview.superseded_help", nil)
 		s.appendAnswerToSession(answer)
 	}
 }
@@ -709,9 +737,9 @@ func (s *interviewAssistant) startAnswerWorker() {
 				)
 				fyne.DoAndWait(func() {
 					if !s.stopping.Load() {
-						question.answer.status.SetText("请求中")
-						question.answer.answer.SetText("正在连接大模型…")
-						s.setStatus("正在请求面试建议…", widget.SuccessImportance)
+						s.locale.setLabel(question.answer.status, "interview.requesting", nil)
+						s.locale.setLabel(question.answer.answer, "interview.connecting_model", nil)
+						s.setStatus("interview.requesting_advice", nil, widget.SuccessImportance)
 					}
 				})
 				requestCtx, cancel := context.WithTimeout(s.ctx, interviewAnswerTimeout)
@@ -729,10 +757,10 @@ func (s *interviewAssistant) startAnswerWorker() {
 						if s.stopping.Load() {
 							return
 						}
-						question.answer.status.SetText("思考中")
+						s.locale.setLabel(question.answer.status, "interview.thinking", nil)
 						question.answer.status.Importance = widget.WarningImportance
-						question.answer.answer.SetText("模型正在思考，建议将在正文生成后显示。")
-						s.setStatus("模型思考中…", widget.SuccessImportance)
+						s.locale.setLabel(question.answer.answer, "interview.thinking_help", nil)
+						s.setStatus("interview.model_thinking", nil, widget.SuccessImportance)
 					})
 				}, func(token string) {
 					isFirstToken := firstToken
@@ -743,9 +771,11 @@ func (s *interviewAssistant) startAnswerWorker() {
 							return
 						}
 						if isFirstToken {
-							question.answer.status.SetText("生成中")
+							question.answer.generating = true
+							s.locale.setLabel(question.answer.status, "interview.generating", nil)
+							s.locale.forgetLabel(question.answer.answer)
 							question.answer.status.Importance = widget.SuccessImportance
-							s.setStatus("正在生成面试建议…", widget.SuccessImportance)
+							s.setStatus("interview.generating_advice", nil, widget.SuccessImportance)
 						}
 						question.answer.content += token
 						question.answer.answer.SetText(question.answer.content)
@@ -755,8 +785,8 @@ func (s *interviewAssistant) startAnswerWorker() {
 				cancel()
 				s.finishAnswer(question.answer)
 				if errors.Is(err, context.DeadlineExceeded) {
-					err = localizedError(
-						fmt.Sprintf("等待大模型响应超过 %s", interviewAnswerTimeout),
+					err = localizedMessageError(
+						"interview.answer_timeout", map[string]any{"Duration": interviewAnswerTimeout},
 						fmt.Sprintf("model response timed out after %s", interviewAnswerTimeout), nil,
 					)
 				}
@@ -775,13 +805,15 @@ func (s *interviewAssistant) startAnswerWorker() {
 					}
 					switch {
 					case err != nil:
+						question.answer.generating = false
 						question.answer.errorText = err.Error()
-						question.answer.status.SetText("生成失败")
-						question.answer.error.SetText("错误：" + err.Error())
+						s.locale.setLabel(question.answer.status, "interview.generation_failed", nil)
+						s.locale.setLabel(question.answer.error, "common.error", map[string]any{"Error": err})
 						question.answer.status.Importance = widget.DangerImportance
-						s.setStatus("模型请求失败", widget.DangerImportance)
+						s.setStatus("interview.model_failed", nil, widget.DangerImportance)
 					default:
-						question.answer.status.SetText("已完成")
+						question.answer.generating = false
+						s.locale.setLabel(question.answer.status, "interview.completed", nil)
 						question.answer.status.Importance = widget.SuccessImportance
 						s.setListeningStatus()
 					}
@@ -821,6 +853,18 @@ func (s *interviewAssistant) saveIncompleteTurns() {
 	}
 }
 
+func (s *interviewAssistant) saveGeneratingAnswers() {
+	for _, answer := range s.answers {
+		if answer.saved || !answer.generating || answer.content == "" {
+			continue
+		}
+		answer.generating = false
+		s.locale.setLabel(answer.status, "interview.interrupted", nil)
+		answer.errorText = "结束时生成被中断"
+		s.appendAnswerToSession(answer)
+	}
+}
+
 func (s *interviewAssistant) setCaptureError(err error) {
 	if err == nil {
 		return
@@ -834,7 +878,7 @@ func (s *interviewAssistant) setCaptureError(err error) {
 	s.debugf("audio capture failed error=%v", err)
 	fyne.Do(func() {
 		if !s.stopping.Load() && s.status != nil {
-			s.setStatus("音频识别异常："+err.Error(), widget.DangerImportance)
+			s.setStatus("interview.capture_error", map[string]any{"Error": err}, widget.DangerImportance)
 		}
 		if s.pauseButton != nil {
 			s.pauseButton.Disable()
@@ -842,8 +886,8 @@ func (s *interviewAssistant) setCaptureError(err error) {
 	})
 }
 
-func (s *interviewAssistant) setStatus(text string, importance widget.Importance) {
-	s.status.SetText(text)
+func (s *interviewAssistant) setStatus(key string, data any, importance widget.Importance) {
+	s.locale.setLabel(s.status, key, data)
 	s.status.Importance = importance
 	s.status.Refresh()
 }
@@ -854,11 +898,11 @@ func (s *interviewAssistant) setListeningStatus() {
 	s.runMu.Unlock()
 	switch {
 	case runErr != nil:
-		s.setStatus("音频识别异常："+runErr.Error(), widget.DangerImportance)
+		s.setStatus("interview.capture_error", map[string]any{"Error": runErr}, widget.DangerImportance)
 	case s.paused:
-		s.setStatus("已暂停", widget.WarningImportance)
+		s.setStatus("common.paused", nil, widget.WarningImportance)
 	default:
-		s.setStatus("正在监听", widget.SuccessImportance)
+		s.setStatus("speech.listening", nil, widget.SuccessImportance)
 	}
 }
 
@@ -870,9 +914,9 @@ func (s *interviewAssistant) togglePause() {
 	s.pauseButton.Disable()
 	pause := !s.paused
 	if pause {
-		s.setStatus("正在暂停…", widget.WarningImportance)
+		s.setStatus("speech.pausing", nil, widget.WarningImportance)
 	} else {
-		s.setStatus("正在恢复…", widget.SuccessImportance)
+		s.setStatus("speech.resuming", nil, widget.SuccessImportance)
 	}
 	go func() {
 		var pauseErr error
@@ -890,7 +934,7 @@ func (s *interviewAssistant) togglePause() {
 			}
 			if pauseErr != nil {
 				log.Printf("pause/resume interview capture: %v", pauseErr)
-				s.setStatus("操作失败："+pauseErr.Error(), widget.DangerImportance)
+				s.setStatus("interview.action_failed", map[string]any{"Error": pauseErr}, widget.DangerImportance)
 				s.pauseButton.Disable()
 				if s.stopRequested {
 					s.stopRequested = false
@@ -900,13 +944,13 @@ func (s *interviewAssistant) togglePause() {
 			}
 			s.paused = pause
 			if pause {
-				s.pauseButton.SetText("继续")
+				s.locale.setButton(s.pauseButton, "speech.resume", nil)
 				s.duration.Pause()
-				s.setStatus("已暂停", widget.WarningImportance)
+				s.setStatus("common.paused", nil, widget.WarningImportance)
 			} else {
-				s.pauseButton.SetText("暂停")
+				s.locale.setButton(s.pauseButton, "speech.pause", nil)
 				s.duration.Resume()
-				s.setStatus("正在监听", widget.SuccessImportance)
+				s.setStatus("speech.listening", nil, widget.SuccessImportance)
 			}
 			s.pauseButton.Enable()
 			if s.stopRequested {
@@ -927,7 +971,7 @@ func (s *interviewAssistant) shutdown() {
 		s.debugf("session stopping")
 		s.stopping.Store(true)
 		s.cancel()
-		s.setStatus("正在结束并保存…", widget.MediumImportance)
+		s.setStatus("speech.saving", nil, widget.MediumImportance)
 		s.pauseButton.Disable()
 		s.stopButton.Disable()
 		s.duration.Stop()
@@ -937,14 +981,7 @@ func (s *interviewAssistant) shutdown() {
 			s.answerWG.Wait()
 			var entries []SessionTranscriptEntry
 			fyne.DoAndWait(func() {
-				for _, answer := range s.answers {
-					if answer.saved || answer.status.Text != "生成中" || answer.content == "" {
-						continue
-					}
-					answer.status.SetText("已中断")
-					answer.errorText = "结束时生成被中断"
-					s.appendAnswerToSession(answer)
-				}
+				s.saveGeneratingAnswers()
 				s.saveIncompleteTurns()
 				s.running.Store(false)
 				entries = append(entries, s.savedEntries...)
@@ -998,13 +1035,14 @@ func (s *interviewAssistant) failStartup(err error) {
 	}
 	fyne.Do(func() {
 		if currentMainWin != nil && !currentMainWin.quitting.Load() {
-			fyneDialog.ShowError(err, currentMainWin.win)
+			showLocalizedError(err, currentMainWin.win)
 		}
 	})
 }
 
 func (s *interviewAssistant) release() {
 	s.releaseOnce.Do(func() {
+		s.locale.stop()
 		s.closeDebugLog()
 		activeInterview.Lock()
 		if activeInterview.window == s {

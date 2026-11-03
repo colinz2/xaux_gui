@@ -78,7 +78,7 @@ func classifyInterviewTurn(ctx context.Context, model interviewAnswerModel, mess
 		return interviewQuestionUncertain, err
 	}
 	if tooLong {
-		return interviewQuestionUncertain, localizedError("问题判断结果格式无效", "invalid question classification response", nil)
+		return interviewQuestionUncertain, localizedMessageError("model.invalid_classification", nil, "invalid question classification response", nil)
 	}
 	switch strings.TrimSpace(result.String()) {
 	case "QUESTION":
@@ -88,7 +88,7 @@ func classifyInterviewTurn(ctx context.Context, model interviewAnswerModel, mess
 	case "UNCERTAIN":
 		return interviewQuestionUncertain, nil
 	default:
-		return interviewQuestionUncertain, localizedError("问题判断结果格式无效", "invalid question classification response", nil)
+		return interviewQuestionUncertain, localizedMessageError("model.invalid_classification", nil, "invalid question classification response", nil)
 	}
 }
 
@@ -153,10 +153,10 @@ func newChatCompletionModel(config modelConfig) (*chatCompletionModel, error) {
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			if request.URL.Scheme == "http" &&
 				!isLoopbackHost(request.URL.Hostname()) {
-				return localizedError("拒绝跳转到不安全的远程 HTTP 模型地址", "refusing redirect to an insecure remote HTTP model endpoint", nil)
+				return localizedMessageError("model.insecure_redirect", nil, "refusing redirect to an insecure remote HTTP model endpoint", nil)
 			}
 			if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && request.URL.Scheme == "http" {
-				return localizedError("拒绝模型请求从 HTTPS 降级到 HTTP", "refusing model request redirect from HTTPS to HTTP", nil)
+				return localizedMessageError("model.downgrade_redirect", nil, "refusing model request redirect from HTTPS to HTTP", nil)
 			}
 			if len(via) >= 10 {
 				return http.ErrUseLastResponse
@@ -196,19 +196,19 @@ func (t *thinkingModeTransport) RoundTrip(request *http.Request) (*http.Response
 	body, err := io.ReadAll(request.Body)
 	closeErr := request.Body.Close()
 	if err != nil {
-		return nil, localizedError("读取模型请求失败", "read model request failed", err)
+		return nil, localizedMessageError("model.request_read_failed", nil, "read model request failed", err)
 	}
 	if closeErr != nil {
-		return nil, localizedError("关闭模型请求失败", "close model request failed", closeErr)
+		return nil, localizedMessageError("model.request_close_failed", nil, "close model request failed", closeErr)
 	}
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, localizedError("解析模型请求失败", "decode model request failed", err)
+		return nil, localizedMessageError("model.request_decode_failed", nil, "decode model request failed", err)
 	}
 	payload["thinking"] = json.RawMessage(`{"type":"disabled"}`)
 	body, err = json.Marshal(payload)
 	if err != nil {
-		return nil, localizedError("编码模型请求失败", "encode model request failed", err)
+		return nil, localizedMessageError("model.request_encode_failed", nil, "encode model request failed", err)
 	}
 	updated := request.Clone(request.Context())
 	updated.Body = io.NopCloser(bytes.NewReader(body))
@@ -253,7 +253,7 @@ func (m *chatCompletionModel) streamAnswer(
 	})
 	if err != nil {
 		m.debugf("request failed after=%s error=%s", time.Since(startedAt).Round(time.Millisecond), diagnosticError(err))
-		return localizedError("请求大模型失败", "model request failed", err)
+		return localizedMessageError("model.request_failed", nil, "model request failed", err)
 	}
 	defer stream.Close()
 	m.debugf("stream connected after=%s", time.Since(startedAt).Round(time.Millisecond))
@@ -271,7 +271,7 @@ func (m *chatCompletionModel) streamAnswer(
 				"stream failed after=%s answer_chars=%d reasoning_chars=%d error=%v",
 				time.Since(startedAt).Round(time.Millisecond), answerBytes, reasoningBytes, diagnosticError(err),
 			)
-			return localizedError("接收大模型回答失败", "receive model response failed", err)
+			return localizedMessageError("model.response_failed", nil, "receive model response failed", err)
 		}
 		if len(response.Choices) == 0 {
 			continue
@@ -307,12 +307,12 @@ func (m *chatCompletionModel) streamAnswer(
 			time.Since(startedAt).Round(time.Millisecond), reasoningBytes,
 		)
 		if reasoningBytes > 0 {
-			return localizedError(
-				fmt.Sprintf("模型仅返回了思考过程，没有生成可显示的回答（思考内容 %d 字符）", reasoningBytes),
+			return localizedMessageError(
+				"model.reasoning_only", map[string]any{"Count": reasoningBytes},
 				fmt.Sprintf("model returned only reasoning with no displayable answer (%d characters)", reasoningBytes), nil,
 			)
 		}
-		return localizedError("模型返回了空回答", "model returned an empty answer", nil)
+		return localizedMessageError("model.empty_response", nil, "model returned an empty answer", nil)
 	}
 	m.debugf(
 		"stream completed total=%s first_answer=%s answer_chars=%d reasoning_chars=%d",
@@ -339,33 +339,33 @@ func maxTokensForModel(model string) int {
 
 func openInterviewDebugLogger(configDir string) (*log.Logger, *os.File, error) {
 	if strings.TrimSpace(configDir) == "" {
-		return nil, nil, localizedError("面试调试日志目录为空", "interview debug log directory is empty", nil)
+		return nil, nil, localizedMessageError("model.log_directory_empty", nil, "interview debug log directory is empty", nil)
 	}
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return nil, nil, localizedError("创建面试调试日志目录失败", "create interview debug log directory failed", err)
+		return nil, nil, localizedMessageError("model.log_directory_create_failed", nil, "create interview debug log directory failed", err)
 	}
 	path := filepath.Join(configDir, interviewDebugLogFileName)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return nil, nil, localizedError("打开面试调试日志失败", "open interview debug log failed", err)
+		return nil, nil, localizedMessageError("model.log_open_failed", nil, "open interview debug log failed", err)
 	}
 	return log.New(file, "", log.LstdFlags|log.Lmicroseconds), file, nil
 }
 
 func resetInterviewDebugLog(configDir string) error {
 	if strings.TrimSpace(configDir) == "" {
-		return localizedError("面试调试日志目录为空", "interview debug log directory is empty", nil)
+		return localizedMessageError("model.log_directory_empty", nil, "interview debug log directory is empty", nil)
 	}
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return localizedError("创建面试调试日志目录失败", "create interview debug log directory failed", err)
+		return localizedMessageError("model.log_directory_create_failed", nil, "create interview debug log directory failed", err)
 	}
 	path := filepath.Join(configDir, interviewDebugLogFileName)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		return localizedError("清空上次面试调试日志失败", "reset interview debug log failed", err)
+		return localizedMessageError("model.log_reset_failed", nil, "reset interview debug log failed", err)
 	}
 	if err := file.Close(); err != nil {
-		return localizedError("关闭面试调试日志失败", "close interview debug log failed", err)
+		return localizedMessageError("model.log_close_failed", nil, "close interview debug log failed", err)
 	}
 	return nil
 }

@@ -20,6 +20,7 @@ type sessionDurationView struct {
 	stop             chan struct{}
 	done             chan struct{}
 	stopOnce         sync.Once
+	locale           *localeBindings
 }
 
 func newSessionDurationView(label *widget.Label, startedAt time.Time) *sessionDurationView {
@@ -28,9 +29,11 @@ func newSessionDurationView(label *widget.Label, startedAt time.Time) *sessionDu
 		segmentStartedAt: startedAt,
 		stop:             make(chan struct{}),
 		done:             make(chan struct{}),
+		locale:           &localeBindings{},
 	}
 	view.active.Store(true)
-	label.SetText("时长：" + formatSessionDuration(time.Since(startedAt)))
+	view.locale.setLabel(label, "common.duration", map[string]any{"Duration": formatSessionDuration(time.Since(startedAt))})
+	view.locale.start()
 	go view.run()
 	return view
 }
@@ -42,10 +45,10 @@ func (v *sessionDurationView) run() {
 	for {
 		select {
 		case now := <-ticker.C:
-			text := "时长：" + formatSessionDuration(v.elapsedAt(now))
+			duration := formatSessionDuration(v.elapsedAt(now))
 			fyne.Do(func() {
 				if v.active.Load() {
-					v.label.SetText(text)
+					v.locale.setLabel(v.label, "common.duration", map[string]any{"Duration": duration})
 				}
 			})
 		case <-v.stop:
@@ -88,8 +91,9 @@ func (v *sessionDurationView) Stop() {
 	if v == nil {
 		return
 	}
-	v.active.Store(false)
 	v.stopOnce.Do(func() {
+		v.active.Store(false)
+		v.locale.stop()
 		close(v.stop)
 	})
 	<-v.done

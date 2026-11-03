@@ -1,7 +1,6 @@
 package gui
 
 import (
-	"fmt"
 	"runtime/debug"
 	"strings"
 
@@ -15,6 +14,7 @@ import (
 const versionMenuItemName = "版本显示"
 
 var versionInformationWindow fyne.Window
+var versionInformationLocale *localeBindings
 
 type thirdPartyComponent struct {
 	modulePath string
@@ -23,10 +23,10 @@ type thirdPartyComponent struct {
 }
 
 var mainThirdPartyComponents = []thirdPartyComponent{
-	{modulePath: "fyne.io/fyne/v2", name: "Fyne", purpose: "桌面界面"},
-	{modulePath: "github.com/realzhangm/xaux", name: "xaux", purpose: "语音识别组件"},
-	{modulePath: "github.com/sashabaranov/go-openai", name: "go-openai", purpose: "大模型接口"},
-	{modulePath: "github.com/sqweek/dialog", name: "dialog", purpose: "系统对话框"},
+	{modulePath: "fyne.io/fyne/v2", name: "Fyne", purpose: "about.desktop"},
+	{modulePath: "github.com/realzhangm/xaux", name: "xaux", purpose: "about.asr"},
+	{modulePath: "github.com/sashabaranov/go-openai", name: "go-openai", purpose: "about.model"},
+	{modulePath: "github.com/sqweek/dialog", name: "dialog", purpose: "about.dialog"},
 }
 
 func openGithubPage() {
@@ -46,14 +46,22 @@ func showVersionInformation() {
 	content.Wrapping = fyne.TextWrapBreak
 	content.Selectable = true
 
-	versionInformationWindow = currentMainWin.app.NewWindow("版本信息")
+	versionInformationWindow = currentMainWin.app.NewWindow(tr("about.title"))
+	versionInformationLocale = &localeBindings{}
+	versionInformationLocale.add(func() {
+		versionInformationWindow.SetTitle(tr("about.title"))
+		content.SetText(formatVersionInformation(buildInfo))
+	})
 	versionInformationWindow.SetContent(container.NewVScroll(container.NewPadded(content)))
 	versionInformationWindow.Resize(versionInformationWindowSize(versionText))
 	versionInformationWindow.CenterOnScreen()
 	versionInformationWindow.SetOnClosed(func() {
+		versionInformationLocale.stop()
+		versionInformationLocale = nil
 		versionInformationWindow = nil
 	})
 	versionInformationWindow.Show()
+	versionInformationLocale.start()
 }
 
 func versionInformationWindowSize(content string) fyne.Size {
@@ -68,13 +76,15 @@ func closeVersionInformationWindow() {
 		return
 	}
 	versionInformationWindow.SetOnClosed(nil)
+	versionInformationLocale.stop()
+	versionInformationLocale = nil
 	versionInformationWindow.Close()
 	versionInformationWindow = nil
 }
 
 func formatVersionInformation(buildInfo *debug.BuildInfo) string {
-	version := "开发版"
-	goVersion := "未知"
+	version := tr("about.development")
+	goVersion := tr("about.unknown")
 	revision := ""
 	modified := false
 	if buildInfo != nil {
@@ -95,33 +105,30 @@ func formatVersionInformation(buildInfo *debug.BuildInfo) string {
 		if len(revision) > 7 {
 			revision = revision[:7]
 		}
-		version += "（" + revision + "）"
+		version += trData("about.revision_suffix", map[string]any{"Revision": revision})
 	}
 	if modified {
-		version += "（本地代码有修改）"
+		version += tr("about.modified")
 	}
 
 	lines := []string{
-		"软件版本：" + version,
-		"Go 版本：" + goVersion,
+		trData("about.version", map[string]any{"Version": version}),
+		trData("about.go_version", map[string]any{"Version": goVersion}),
 		"",
-		"主要第三方组件：",
+		tr("about.components"),
 	}
 	for _, component := range mainThirdPartyComponents {
 		componentVersion := dependencyVersion(buildInfo, component.modulePath)
-		lines = append(lines, fmt.Sprintf(
-			"%s %s：%s",
-			component.name,
-			componentVersion,
-			component.purpose,
-		))
+		lines = append(lines, trData("about.component_line", map[string]any{
+			"Name": component.name, "Version": componentVersion, "Purpose": tr(component.purpose),
+		}))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func dependencyVersion(buildInfo *debug.BuildInfo, modulePath string) string {
 	if buildInfo == nil {
-		return "版本未知"
+		return tr("about.version_unknown")
 	}
 	for _, dependency := range buildInfo.Deps {
 		if dependency.Path != modulePath {
@@ -129,13 +136,13 @@ func dependencyVersion(buildInfo *debug.BuildInfo, modulePath string) string {
 		}
 		if dependency.Replace != nil {
 			if dependency.Replace.Version == "" {
-				return "本地替换"
+				return tr("about.local_replacement")
 			}
 			return formatDependencyVersion(dependency.Replace.Version)
 		}
 		return formatDependencyVersion(dependency.Version)
 	}
-	return "版本未记录"
+	return tr("about.version_missing")
 }
 
 func formatDependencyVersion(version string) string {
@@ -150,5 +157,5 @@ func formatDependencyVersion(version string) string {
 	if len(revision) > 12 {
 		revision = revision[:12]
 	}
-	return "提交 " + revision
+	return trData("about.revision", map[string]any{"Revision": revision})
 }

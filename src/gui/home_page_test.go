@@ -41,6 +41,64 @@ func TestMainMenuUsesSimpleTopLevelNavigation(t *testing.T) {
 	}
 }
 
+func TestMainMenuLanguageSwitchKeepsSingleQuitAction(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+	if err := uiLocale.setLanguage(localeChinese); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := uiLocale.setLanguage(localeChinese); err != nil {
+			t.Error(err)
+		}
+	})
+	window := app.NewWindow("menu test")
+	defer window.Close()
+	main := &MainWin{app: app, win: window}
+	main.bindMainMenu()
+	defer main.unsubscribeLocale()
+
+	cases := []struct {
+		language string
+		menus    []string
+		items    [][]string
+	}{
+		{localeEnglish, []string{"Start", "Voice", "History", "About"}, [][]string{
+			{"Settings", "Exit"}, {"Record", "Transcribe", "Interview"}, {"Session history"}, {"Version", "github"},
+		}},
+		{localeChinese, []string{"开始", "语音", "历史", "关于"}, [][]string{
+			{"设置", "退出"}, {"录音", "转写", "面试"}, {"会话历史"}, {"版本显示", "github"},
+		}},
+		{localeEnglish, []string{"Start", "Voice", "History", "About"}, [][]string{
+			{"Settings", "Exit"}, {"Record", "Transcribe", "Interview"}, {"Session history"}, {"Version", "github"},
+		}},
+	}
+	for _, tc := range cases {
+		if err := uiLocale.setLanguage(tc.language); err != nil {
+			t.Fatal(err)
+		}
+		menu := window.MainMenu()
+		if len(menu.Items) != len(tc.menus) {
+			t.Fatalf("%s: got %d top-level menus, want %d", tc.language, len(menu.Items), len(tc.menus))
+		}
+		for i, expected := range tc.menus {
+			group := menu.Items[i]
+			if group.Label != expected || len(group.Items) != len(tc.items[i]) {
+				t.Fatalf("%s: menu %d = %q with %d items", tc.language, i, group.Label, len(group.Items))
+			}
+			for j, label := range tc.items[i] {
+				if group.Items[j].Label != label {
+					t.Errorf("%s: menu %q item %d = %q, want %q", tc.language, expected, j, group.Items[j].Label, label)
+				}
+			}
+		}
+		quit := menu.Items[0].Items[len(menu.Items[0].Items)-1]
+		if !quit.IsQuit || quit.Action == nil {
+			t.Fatalf("%s: final menu item must be an explicit quit item with an action", tc.language)
+		}
+	}
+}
+
 func TestHomePageContainsOnlyAudioPanel(t *testing.T) {
 	app := fynetest.NewApp()
 	defer app.Quit()
@@ -85,6 +143,43 @@ func TestHomePageAudioControlsRemainInteractive(t *testing.T) {
 	fynetest.Tap(speakerCheck)
 	if setting.speakerSelected {
 		t.Fatal("speaker checkbox did not respond to a tap")
+	}
+}
+
+func TestHomeDeviceLabelsFitBothLanguages(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+	if err := uiLocale.setLanguage(localeChinese); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := uiLocale.setLanguage(localeChinese); err != nil {
+			t.Error(err)
+		}
+	})
+	setting := newAppSetting()
+	panel := setting.makeAudioDevicePanel(nil, nil).(*fyne.Container)
+	setting.homeLocale.start()
+	defer setting.homeLocale.stop()
+
+	for _, language := range []string{localeChinese, localeEnglish, localeChinese} {
+		if err := uiLocale.setLanguage(language); err != nil {
+			t.Fatal(err)
+		}
+		var widths []float32
+		for _, index := range []int{2, 4} {
+			row := panel.Objects[index].(*fyne.Container)
+			wrap := row.Objects[1].(*fyne.Container)
+			label := wrap.Objects[0].(*widget.Label)
+			width := wrap.MinSize().Width
+			if width < label.MinSize().Width {
+				t.Errorf("%s label %q needs %.2f width, got %.2f", language, label.Text, label.MinSize().Width, width)
+			}
+			widths = append(widths, width)
+		}
+		if widths[0] != widths[1] {
+			t.Errorf("%s device label widths are not aligned: %v", language, widths)
+		}
 	}
 }
 

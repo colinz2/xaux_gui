@@ -164,20 +164,20 @@ func (s *Session) AddRecording(fileName string) error {
 }
 
 func (s *Session) SaveJobDescription(description string) error {
-	description, err := validateInterviewContext(description, "职位描述")
+	description, err := validateInterviewContext(description, &localizedText{key: "reference.job"})
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.info.Kind != SessionKindInterview || s.info.Status != SessionStatusRunning {
-		return errors.New("只能为进行中的面试会话保存职位描述")
+		return localizedMessageError("session.job_requires_interview", nil, "job description requires a running interview", nil)
 	}
 	if description == "" {
 		return nil
 	}
 	if err := os.WriteFile(filepath.Join(s.info.Directory, sessionJobDescriptionName), []byte(description), 0o600); err != nil {
-		return fmt.Errorf("保存职位描述失败：%w", err)
+		return localizedMessageError("session.job_save_failed", nil, "save job description failed", err)
 	}
 	updated := s.info
 	updated.JobDescriptionFile = sessionJobDescriptionName
@@ -246,21 +246,21 @@ func writeSessionManifest(info SessionInfo) error {
 
 func saveInterviewReview(info *SessionInfo, review string) error {
 	if info == nil || info.Kind != SessionKindInterview {
-		return localizedError("只能为面试会话保存复盘", "interview review requires an interview session", nil)
+		return localizedMessageError("session.review_requires_interview", nil, "interview review requires an interview session", nil)
 	}
-	return saveSessionAnalysis(info, review, sessionInterviewReviewName, "复盘")
+	return saveSessionAnalysis(info, review, sessionInterviewReviewName)
 }
 
 func saveTranscriptionSummary(info *SessionInfo, summary string) error {
 	if info == nil || info.Kind != SessionKindTranscription {
-		return localizedError("只能为转写会话保存总结", "transcription summary requires a transcription session", nil)
+		return localizedMessageError("session.summary_requires_transcription", nil, "transcription summary requires a transcription session", nil)
 	}
-	return saveSessionAnalysis(info, summary, sessionSummaryName, "总结")
+	return saveSessionAnalysis(info, summary, sessionSummaryName)
 }
 
 func saveSessionAnalysisResult(info *SessionInfo, content string) error {
 	if info == nil {
-		return localizedError("会话为空", "session is nil", nil)
+		return localizedMessageError("session.empty", nil, "session is nil", nil)
 	}
 	switch info.Kind {
 	case SessionKindInterview:
@@ -268,24 +268,24 @@ func saveSessionAnalysisResult(info *SessionInfo, content string) error {
 	case SessionKindTranscription:
 		return saveTranscriptionSummary(info, content)
 	default:
-		return localizedError("该会话类型不支持 AI 总结或复盘", "session type does not support AI analysis", nil)
+		return localizedMessageError("session.analysis_unsupported", nil, "session type does not support AI analysis", nil)
 	}
 }
 
-func saveSessionAnalysis(info *SessionInfo, content, fileName, label string) error {
+func saveSessionAnalysis(info *SessionInfo, content, fileName string) error {
 	if info.Status == SessionStatusRunning {
-		return localizedError(fmt.Sprintf("会话结束后才能生成%s", label), "session must finish before generating analysis", nil)
+		return localizedMessageError("session.analysis_requires_finished", analysisData(info.Kind, nil), "session must finish before generating analysis", nil)
 	}
 	content = strings.TrimSpace(content)
 	if content == "" {
-		return localizedError(fmt.Sprintf("%s内容为空", label), "analysis content is empty", nil)
+		return localizedMessageError("session.analysis_empty", analysisData(info.Kind, nil), "analysis content is empty", nil)
 	}
 	if strings.TrimSpace(info.Directory) == "" {
-		return localizedError("会话目录为空", "session directory is empty", nil)
+		return localizedMessageError("session.directory_empty", nil, "session directory is empty", nil)
 	}
 	path := filepath.Join(info.Directory, fileName)
 	if err := os.WriteFile(path, []byte(content+"\n"), 0o644); err != nil {
-		return localizedError(fmt.Sprintf("保存%s失败", label), "save session analysis failed", err)
+		return localizedMessageError("session.analysis_save_failed", analysisData(info.Kind, nil), "save session analysis failed", err)
 	}
 
 	updated := *info
@@ -361,13 +361,13 @@ func LoadSessions(rootDir string) ([]SessionInfo, error) {
 func sessionStatusText(status SessionStatus) string {
 	switch status {
 	case SessionStatusRunning:
-		return "进行中"
+		return tr("history.status_running")
 	case SessionStatusCompleted:
-		return "已完成"
+		return tr("history.status_completed")
 	case SessionStatusStopped:
-		return "已停止"
+		return tr("common.stopped")
 	case SessionStatusFailed:
-		return "失败"
+		return tr("history.status_failed")
 	default:
 		return string(status)
 	}
@@ -376,11 +376,11 @@ func sessionStatusText(status SessionStatus) string {
 func sessionKindText(kind SessionKind) string {
 	switch kind {
 	case SessionKindRecording:
-		return "录音"
+		return tr("menu.record")
 	case SessionKindTranscription:
-		return "转写"
+		return tr("menu.transcription")
 	case SessionKindInterview:
-		return "面试"
+		return tr("menu.interview")
 	default:
 		return string(kind)
 	}

@@ -55,10 +55,10 @@ func TestConfigurationWindowContainsPersistentInterviewReferences(t *testing.T) 
 	}
 	padded := scroll.Content.(*fyne.Container)
 	panels := padded.Objects[0].(*fyne.Container)
-	if len(panels.Objects) != 3 {
-		t.Fatalf("settings has %d panels, want session, model and interview", len(panels.Objects))
+	if len(panels.Objects) != 4 {
+		t.Fatalf("settings has %d panels, want language, session, model and interview", len(panels.Objects))
 	}
-	referenceCard, ok := panels.Objects[2].(*widget.Card)
+	referenceCard, ok := panels.Objects[3].(*widget.Card)
 	if !ok || referenceCard.Title != "面试资料" {
 		t.Fatal("interview references are missing from settings")
 	}
@@ -118,7 +118,7 @@ func TestConfigurationWindowContainsPersistentInterviewReferences(t *testing.T) 
 	restoredScroll := restored.configurationWindow.Content().(*container.Scroll)
 	restoredPadded := restoredScroll.Content.(*fyne.Container)
 	restoredPanels := restoredPadded.Objects[0].(*fyne.Container)
-	restoredCard := restoredPanels.Objects[2].(*widget.Card)
+	restoredCard := restoredPanels.Objects[3].(*widget.Card)
 	restoredReferences := restoredCard.Content.(*fyne.Container)
 	restoredResume := restoredReferences.Objects[0].(*fyne.Container)
 	restoredRow := restoredResume.Objects[0].(*fyne.Container)
@@ -138,75 +138,85 @@ func TestConfigurationWindowContainsPersistentInterviewReferences(t *testing.T) 
 func TestConfigurationFieldsStayAligned(t *testing.T) {
 	app := fynetest.NewApp()
 	defer app.Quit()
-	for _, currentTheme := range []fyne.Theme{theme.DefaultTheme(), mytheme.MyTheme{}} {
-		app.Settings().SetTheme(currentTheme)
-		setting := newAppSetting()
-		setting.initialized = true
-		setting.sessionRootDir = t.TempDir()
-		if err := setting.openConfigurationWindow(); err != nil {
+	t.Cleanup(func() {
+		if err := uiLocale.setLanguage(localeChinese); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, currentLocale := range []string{localeChinese, localeEnglish} {
+		if err := uiLocale.setLanguage(currentLocale); err != nil {
 			t.Fatal(err)
 		}
-		scroll := setting.configurationWindow.Content().(*container.Scroll)
-		padded := scroll.Content.(*fyne.Container)
-		panels := padded.Objects[0].(*fyne.Container)
-		referenceCard := panels.Objects[2].(*widget.Card)
-		references := referenceCard.Content.(*fyne.Container)
+		for _, currentTheme := range []fyne.Theme{theme.DefaultTheme(), mytheme.MyTheme{}} {
+			app.Settings().SetTheme(currentTheme)
+			setting := newAppSetting()
+			setting.initialized = true
+			setting.sessionRootDir = t.TempDir()
+			if err := setting.openConfigurationWindow(); err != nil {
+				t.Fatal(err)
+			}
+			scroll := setting.configurationWindow.Content().(*container.Scroll)
+			padded := scroll.Content.(*fyne.Container)
+			panels := padded.Objects[0].(*fyne.Container)
+			referenceCard := panels.Objects[3].(*widget.Card)
+			references := referenceCard.Content.(*fyne.Container)
 
-		findRowObjects := func(object fyne.CanvasObject) (*widget.Entry, *widget.Button) {
-			panel := object.(*fyne.Container)
-			row := panel.Objects[0].(*fyne.Container)
-			var entry *widget.Entry
-			var button *widget.Button
-			for _, child := range row.Objects {
-				if value, ok := child.(*widget.Entry); ok {
-					entry = value
+			findRowObjects := func(object fyne.CanvasObject) (*widget.Entry, *widget.Button) {
+				panel := object.(*fyne.Container)
+				row := panel.Objects[0].(*fyne.Container)
+				var entry *widget.Entry
+				var button *widget.Button
+				for _, child := range row.Objects {
+					if value, ok := child.(*widget.Entry); ok {
+						entry = value
+					}
+					if group, ok := child.(*fyne.Container); ok {
+						for _, nested := range group.Objects {
+							if value, ok := nested.(*widget.Button); ok {
+								button = value
+							}
+						}
+					}
 				}
-				if group, ok := child.(*fyne.Container); ok {
-					for _, nested := range group.Objects {
-						if value, ok := nested.(*widget.Button); ok {
-							button = value
+				if entry == nil || button == nil {
+					t.Fatal("reference row is missing entry or selection button")
+				}
+				return entry, button
+			}
+			resumeEntry, resumeButton := findRowObjects(references.Objects[0])
+			knowledgeEntry, knowledgeButton := findRowObjects(references.Objects[2])
+			resumeCheck := findCheck(references.Objects[0])
+			knowledgeCheck := findCheck(references.Objects[2])
+			if resumeCheck == nil || knowledgeCheck == nil {
+				t.Fatal("reference checkboxes are missing")
+			}
+			aligned := func(first, second fyne.CanvasObject) bool {
+				firstX := app.Driver().AbsolutePositionForObject(first).X
+				secondX := app.Driver().AbsolutePositionForObject(second).X
+				return firstX == secondX && first.Size().Width == second.Size().Width
+			}
+			for _, enabled := range []bool{false, true} {
+				resumeCheck.SetChecked(enabled)
+				knowledgeCheck.SetChecked(enabled)
+				for _, width := range []float32{720, 880, 1100} {
+					setting.configurationWindow.Resize(fyne.NewSize(width, 680))
+					if !aligned(setting.modelURLEntry, setting.modelAPIKeyEntry) ||
+						!aligned(setting.modelURLEntry, setting.modelNameEntry) {
+						t.Fatalf("model inputs are not aligned at width %v", width)
+					}
+					if !aligned(resumeEntry, knowledgeEntry) || !aligned(resumeButton, knowledgeButton) {
+						t.Fatalf("reference controls are not aligned at width %v: resume=%v/%v knowledge=%v/%v",
+							width, resumeEntry.Position(), resumeEntry.Size(), knowledgeEntry.Position(), knowledgeEntry.Size())
+					}
+					for _, control := range []fyne.CanvasObject{resumeCheck, knowledgeCheck, resumeButton, knowledgeButton} {
+						if control.Size().Width < control.MinSize().Width {
+							t.Fatalf("reference control is clipped at width %v", width)
 						}
 					}
 				}
 			}
-			if entry == nil || button == nil {
-				t.Fatal("reference row is missing entry or selection button")
-			}
-			return entry, button
+			setting.closeWindows()
 		}
-		resumeEntry, resumeButton := findRowObjects(references.Objects[0])
-		knowledgeEntry, knowledgeButton := findRowObjects(references.Objects[2])
-		resumeCheck := findCheck(references.Objects[0])
-		knowledgeCheck := findCheck(references.Objects[2])
-		if resumeCheck == nil || knowledgeCheck == nil {
-			t.Fatal("reference checkboxes are missing")
-		}
-		aligned := func(first, second fyne.CanvasObject) bool {
-			firstX := app.Driver().AbsolutePositionForObject(first).X
-			secondX := app.Driver().AbsolutePositionForObject(second).X
-			return firstX == secondX && first.Size().Width == second.Size().Width
-		}
-		for _, enabled := range []bool{false, true} {
-			resumeCheck.SetChecked(enabled)
-			knowledgeCheck.SetChecked(enabled)
-			for _, width := range []float32{720, 880, 1100} {
-				setting.configurationWindow.Resize(fyne.NewSize(width, 680))
-				if !aligned(setting.modelURLEntry, setting.modelAPIKeyEntry) ||
-					!aligned(setting.modelURLEntry, setting.modelNameEntry) {
-					t.Fatalf("model inputs are not aligned at width %v", width)
-				}
-				if !aligned(resumeEntry, knowledgeEntry) || !aligned(resumeButton, knowledgeButton) {
-					t.Fatalf("reference controls are not aligned at width %v: resume=%v/%v knowledge=%v/%v",
-						width, resumeEntry.Position(), resumeEntry.Size(), knowledgeEntry.Position(), knowledgeEntry.Size())
-				}
-				for _, control := range []fyne.CanvasObject{resumeCheck, knowledgeCheck, resumeButton, knowledgeButton} {
-					if control.Size().Width < control.MinSize().Width {
-						t.Fatalf("reference control is clipped at width %v", width)
-					}
-				}
-			}
-		}
-		setting.closeWindows()
 	}
 }
 

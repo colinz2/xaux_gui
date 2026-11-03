@@ -62,13 +62,14 @@ type speechRTTrans struct {
 	transitioning    bool
 	stopRequested    bool
 	followLatest     bool
+	locale           *localeBindings
 }
 
 func newSpeechRTTrans() *speechRTTrans {
 	if !acquireVoiceTask(realTimeTransMenuName) {
 		return nil
 	}
-	return &speechRTTrans{followLatest: true, shutdownDone: make(chan struct{})}
+	return &speechRTTrans{followLatest: true, shutdownDone: make(chan struct{}), locale: &localeBindings{}}
 }
 
 func (s *speechRTTrans) updateASRResult(capture *asrSoundCap, response *x.AllResponse) {
@@ -173,10 +174,10 @@ func (s *speechRTTrans) updateTranscriptRow(index int, item *transcriptItem) {
 
 func (s *speechRTTrans) setTranscriptRowStatus(row *transcriptRow, item *transcriptItem) {
 	if item.final {
-		row.status.SetText("")
+		s.locale.clearLabel(row.status)
 		return
 	}
-	row.status.SetText("识别中")
+	s.locale.setLabel(row.status, "speech.recognizing", nil)
 }
 
 func transcriptNearBottom(contentHeight, viewportHeight, offsetY float32) bool {
@@ -211,7 +212,7 @@ func (s *speechRTTrans) setCaptureError(err error) {
 	log.Printf("real-time transcription: %v", err)
 	fyne.Do(func() {
 		if s.status != nil && !s.stopping.Load() {
-			s.status.SetText("识别异常：" + err.Error())
+			s.locale.setLabel(s.status, "speech.capture_error", map[string]any{"Error": err})
 			s.status.Importance = widget.DangerImportance
 			s.status.Refresh()
 		}
@@ -244,20 +245,24 @@ func (s *speechRTTrans) start(onClosed func(), onPause func() error, onResume fu
 	s.onPause = onPause
 	s.onResume = onResume
 
-	s.status = widget.NewLabel("正在监听")
+	s.status = widget.NewLabel("")
+	s.locale.setLabel(s.status, "speech.listening", nil)
 	s.status.Importance = widget.SuccessImportance
 	startedAt := s.sessionStartedAt
 	if startedAt.IsZero() {
 		startedAt = time.Now()
 	}
 	s.duration = newSessionDurationView(widget.NewLabel(""), startedAt)
-	s.pauseButton = widget.NewButton("暂停", s.togglePause)
-	s.stopButton = widget.NewButtonWithIcon("停止并保存", mytheme.ResEnd, s.shutdown)
-	s.latestButton = widget.NewButton("回到最新", func() {
+	s.pauseButton = widget.NewButton("", s.togglePause)
+	s.locale.setButton(s.pauseButton, "speech.pause", nil)
+	s.stopButton = widget.NewButtonWithIcon("", mytheme.ResEnd, s.shutdown)
+	s.locale.setButton(s.stopButton, "speech.stop_save", nil)
+	s.latestButton = widget.NewButton("", func() {
 		s.followLatest = true
 		s.scroll.ScrollToBottom()
 		s.latestButton.Hide()
 	})
+	s.locale.setButton(s.latestButton, "speech.latest", nil)
 	s.latestButton.Hide()
 
 	toolbar := container.NewHBox(
@@ -268,7 +273,8 @@ func (s *speechRTTrans) start(onClosed func(), onPause func() error, onResume fu
 		s.stopButton,
 	)
 	s.transcript = container.NewVBox()
-	s.emptyState = widget.NewLabel("等待语音输入…")
+	s.emptyState = widget.NewLabel("")
+	s.locale.setLabel(s.emptyState, "speech.waiting", nil)
 	s.emptyState.Importance = widget.LowImportance
 	s.transcript.Objects = []fyne.CanvasObject{container.NewCenter(s.emptyState)}
 	s.scroll = container.NewVScroll(s.transcript)
@@ -294,7 +300,8 @@ func (s *speechRTTrans) start(onClosed func(), onPause func() error, onResume fu
 		nil, nil,
 		s.scroll,
 	)
-	s.window = fyne.CurrentApp().NewWindow("转写")
+	s.window = fyne.CurrentApp().NewWindow(tr("speech.title"))
+	s.locale.add(func() { s.window.SetTitle(tr("speech.title")) })
 	s.window.SetContent(content)
 	s.window.Resize(fyne.NewSize(960, 640))
 	s.window.CenterOnScreen()
@@ -305,6 +312,7 @@ func (s *speechRTTrans) start(onClosed func(), onPause func() error, onResume fu
 	activeSpeech.window = s
 	activeSpeech.Unlock()
 	s.window.Show()
+	s.locale.start()
 }
 
 func (s *speechRTTrans) togglePause() {
@@ -315,9 +323,9 @@ func (s *speechRTTrans) togglePause() {
 	s.pauseButton.Disable()
 	pause := !s.paused
 	if pause {
-		s.status.SetText("正在暂停…")
+		s.locale.setLabel(s.status, "speech.pausing", nil)
 	} else {
-		s.status.SetText("正在恢复…")
+		s.locale.setLabel(s.status, "speech.resuming", nil)
 	}
 	action := s.onPause
 	if !pause {
@@ -336,13 +344,13 @@ func (s *speechRTTrans) togglePause() {
 			if err != nil {
 				s.setRunError(err)
 				log.Printf("pause/resume real-time transcription: %v", err)
-				s.status.SetText("操作失败；请停止并保存：" + err.Error())
+				s.locale.setLabel(s.status, "speech.action_failed", map[string]any{"Error": err})
 				s.status.Importance = widget.DangerImportance
 				s.status.Refresh()
 				if s.paused {
-					s.pauseButton.SetText("继续")
+					s.locale.setButton(s.pauseButton, "speech.resume", nil)
 				} else {
-					s.pauseButton.SetText("暂停")
+					s.locale.setButton(s.pauseButton, "speech.pause", nil)
 				}
 				s.pauseButton.Disable()
 				if s.stopRequested {
@@ -353,12 +361,12 @@ func (s *speechRTTrans) togglePause() {
 			}
 			s.paused = pause
 			if s.paused {
-				s.status.SetText("已暂停")
-				s.pauseButton.SetText("继续")
+				s.locale.setLabel(s.status, "common.paused", nil)
+				s.locale.setButton(s.pauseButton, "speech.resume", nil)
 				s.duration.Pause()
 			} else {
-				s.status.SetText("正在监听")
-				s.pauseButton.SetText("暂停")
+				s.locale.setLabel(s.status, "speech.listening", nil)
+				s.locale.setButton(s.pauseButton, "speech.pause", nil)
 				s.duration.Resume()
 			}
 			s.status.Importance = widget.SuccessImportance
@@ -384,12 +392,12 @@ func (s *speechRTTrans) shutdown() {
 	s.shutdownOnce.Do(func() {
 		s.stopping.Store(true)
 		if s.status != nil {
-			s.status.SetText("正在结束并保存…")
+			s.locale.setLabel(s.status, "speech.saving", nil)
 			s.status.Importance = widget.MediumImportance
 			s.status.Refresh()
 		}
 		if len(s.listItems) == 0 && s.emptyState != nil {
-			s.emptyState.SetText("未识别到语音内容")
+			s.locale.setLabel(s.emptyState, "speech.no_content", nil)
 		}
 		if s.pauseButton != nil {
 			s.pauseButton.Disable()
@@ -421,6 +429,7 @@ func (s *speechRTTrans) shutdown() {
 
 func (s *speechRTTrans) release() {
 	s.releaseOnce.Do(func() {
+		s.locale.stop()
 		activeSpeech.Lock()
 		if activeSpeech.window == s {
 			activeSpeech.window = nil

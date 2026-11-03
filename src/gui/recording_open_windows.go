@@ -2,11 +2,7 @@
 
 package gui
 
-import (
-	"fmt"
-
-	"golang.org/x/sys/windows"
-)
+import "golang.org/x/sys/windows"
 
 func openRecordingFile(path string) error {
 	return openWindowsRecordingFile(path, windows.ShellExecute)
@@ -15,7 +11,7 @@ func openRecordingFile(path string) error {
 func openWindowsRecordingFile(path string, shellExecute func(windows.Handle, *uint16, *uint16, *uint16, *uint16, int32) error) error {
 	file, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return fmt.Errorf("录音路径无效：%w", err)
+		return localizedMessageError("history.recording_invalid_path", nil, "invalid recording path", err)
 	}
 	verb, err := windows.UTF16PtrFromString("open")
 	if err != nil {

@@ -17,13 +17,13 @@ type interviewContext struct {
 	knowledge      string
 }
 
-func validateInterviewContext(text, label string) (string, error) {
+func validateInterviewContext(text string, label fmt.Stringer) (string, error) {
 	text = strings.TrimSpace(text)
 	if !utf8.ValidString(text) || strings.ContainsRune(text, 0) {
-		return "", localizedError(fmt.Sprintf("%s必须是 UTF-8 文本", label), "reference must be valid UTF-8 text", nil)
+		return "", localizedMessageError("reference.utf8", map[string]any{"Label": label}, "reference must be valid UTF-8 text", nil)
 	}
 	if len(text) > maxInterviewContextBytes {
-		return "", localizedError(fmt.Sprintf("%s不能超过 %d KB", label, maxInterviewContextBytes/1024),
+		return "", localizedMessageError("reference.too_large", map[string]any{"Label": label, "Limit": maxInterviewContextBytes / 1024},
 			fmt.Sprintf("reference exceeds %d KB", maxInterviewContextBytes/1024), nil)
 	}
 	return text, nil
@@ -34,30 +34,30 @@ func loadInterviewResume(enabled bool, path string) (string, error) {
 		return "", nil
 	}
 	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("已启用简历，请选择 Markdown 文件")
+		return "", localizedMessageError("reference.resume_required", nil, "resume file is required", nil)
 	}
 	if !strings.EqualFold(filepath.Ext(path), ".md") && !strings.EqualFold(filepath.Ext(path), ".markdown") {
-		return "", fmt.Errorf("简历文件必须是 Markdown（.md 或 .markdown）")
+		return "", localizedMessageError("reference.resume_format", nil, "resume must be a Markdown file", nil)
 	}
-	resume, err := readInterviewReference(path, "简历文件")
+	resume, err := readInterviewReference(path, &localizedText{key: "reference.resume_file"})
 	if err != nil {
 		return "", err
 	}
 	if resume == "" {
-		return "", fmt.Errorf("简历文件为空，请填写内容或关闭使用简历")
+		return "", localizedMessageError("reference.resume_empty", nil, "resume file is empty", nil)
 	}
 	return resume, nil
 }
 
-func readInterviewReference(path, label string) (string, error) {
+func readInterviewReference(path string, label fmt.Stringer) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", localizedError(fmt.Sprintf("打开%s失败", label), "open reference failed", err)
+		return "", localizedMessageError("reference.open_failed", map[string]any{"Label": label}, "open reference failed", err)
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, maxInterviewContextBytes+1))
 	if err != nil {
-		return "", localizedError(fmt.Sprintf("读取%s失败", label), "read reference failed", err)
+		return "", localizedMessageError("reference.read_failed", map[string]any{"Label": label}, "read reference failed", err)
 	}
 	return validateInterviewContext(string(data), label)
 }

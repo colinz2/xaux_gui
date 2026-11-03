@@ -10,7 +10,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
-	fyneDialog "fyne.io/fyne/v2/dialog"
 )
 
 const (
@@ -21,14 +20,16 @@ const (
 var currentMainWin *MainWin
 
 type MainWin struct {
-	app      fyne.App
-	win      fyne.Window
-	quitting atomic.Bool
+	app               fyne.App
+	win               fyne.Window
+	quitting          atomic.Bool
+	unsubscribeLocale func()
 }
 
 func NewMainWin() *MainWin {
 	mw := &MainWin{}
 	mw.app = app.NewWithID(appID)
+	restoreUILanguage(mw.app.Preferences())
 	if err := resetInterviewDebugLog(mw.app.Storage().RootURI().Path()); err != nil {
 		log.Printf("reset interview debug log at startup: %s", diagnosticError(err))
 	}
@@ -36,7 +37,7 @@ func NewMainWin() *MainWin {
 	mw.app.Settings().SetTheme(mytheme.MyTheme{})
 
 	mw.win = mw.app.NewWindow(mainWindowTitle)
-	mw.win.SetMainMenu(newMainMenu())
+	mw.bindMainMenu()
 	mw.win.SetPadded(false)
 	mw.win.CenterOnScreen()
 	mw.win.SetMaster()
@@ -46,14 +47,31 @@ func NewMainWin() *MainWin {
 	return mw
 }
 
+func (m *MainWin) bindMainMenu() {
+	m.win.SetMainMenu(newMainMenu())
+	m.unsubscribeLocale = uiLocale.subscribe(func() {
+		m.win.SetMainMenu(newMainMenu())
+	})
+}
+
+func restoreUILanguage(preferences fyne.Preferences) {
+	savedLocale := preferences.StringWithFallback(localePreference, localeChinese)
+	if err := uiLocale.setLanguage(savedLocale); err != nil {
+		log.Printf("load UI language: %v", err)
+		if err := uiLocale.setLanguage(localeChinese); err != nil {
+			panic(err)
+		}
+	}
+}
+
 func (m *MainWin) quitHandle() {
 	setting, err := currentAppSetting()
 	if err != nil {
-		fyneDialog.ShowError(err, m.win)
+		showLocalizedError(err, m.win)
 		return
 	}
 	if err := setting.saveModelConfigIfDirty(); err != nil {
-		fyneDialog.ShowError(err, m.win)
+		showLocalizedError(err, m.win)
 		return
 	}
 	if !m.quitting.CompareAndSwap(false, true) {
@@ -75,6 +93,10 @@ func (m *MainWin) quitHandle() {
 			closeVersionInformationWindow()
 			closeActiveSessionHistory()
 			setting.closeWindows()
+			setting.homeLocale.stop()
+			if m.unsubscribeLocale != nil {
+				m.unsubscribeLocale()
+			}
 			m.win.SetCloseIntercept(nil)
 			m.win.Close()
 		})
@@ -93,6 +115,7 @@ func (m *MainWin) Run() {
 		panic(fmt.Errorf("initialize audio settings: %w", err))
 	}
 	homePage := newHomePage(setting.audioDevicePanel)
+	setting.homeLocale.start()
 	m.win.SetContent(homePage)
 	m.win.Resize(homeWindowSize(homePage))
 	m.win.ShowAndRun()

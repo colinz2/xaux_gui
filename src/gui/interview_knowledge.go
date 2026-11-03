@@ -14,11 +14,11 @@ func loadInterviewKnowledge(enabled bool, directory string) (string, error) {
 		return "", nil
 	}
 	if strings.TrimSpace(directory) == "" {
-		return "", fmt.Errorf("已启用面试知识，请选择文件夹")
+		return "", localizedMessageError("knowledge.folder_required", nil, "interview knowledge folder is required", nil)
 	}
 	entries, err := os.ReadDir(directory)
 	if err != nil {
-		return "", fmt.Errorf("读取面试知识文件夹失败：%w", err)
+		return "", localizedMessageError("knowledge.folder_read_failed", nil, "read interview knowledge folder failed", err)
 	}
 	var result strings.Builder
 	count := 0
@@ -29,34 +29,35 @@ func loadInterviewKnowledge(enabled bool, directory string) (string, error) {
 		}
 		info, err := entry.Info()
 		if err != nil {
-			return "", fmt.Errorf("检查知识文件 %q 失败：%w", entry.Name(), err)
+			return "", localizedMessageError("knowledge.check_failed", map[string]any{"Name": fmt.Sprintf("%q", entry.Name())}, fmt.Sprintf("check knowledge file %q failed", entry.Name()), err)
 		}
 		if !info.Mode().IsRegular() {
-			return "", fmt.Errorf("知识文件 %q 不是普通文件", entry.Name())
+			return "", localizedMessageError("knowledge.not_file", map[string]any{"Name": fmt.Sprintf("%q", entry.Name())}, fmt.Sprintf("knowledge file %q is not a regular file", entry.Name()), nil)
 		}
 		count++
 		if count > maxKnowledgeFiles {
-			return "", fmt.Errorf("知识文件不能超过 %d 个", maxKnowledgeFiles)
+			return "", localizedMessageError("knowledge.too_many", map[string]any{"Limit": maxKnowledgeFiles}, fmt.Sprintf("knowledge files exceed limit %d", maxKnowledgeFiles), nil)
 		}
-		text, err := readInterviewReference(filepath.Join(directory, entry.Name()), "知识文件 "+entry.Name())
+		text, err := readInterviewReference(filepath.Join(directory, entry.Name()),
+			&localizedText{key: "reference.knowledge_file", data: map[string]any{"Name": entry.Name()}})
 		if err != nil {
 			return "", err
 		}
 		if text == "" {
-			return "", fmt.Errorf("知识文件 %q 为空", entry.Name())
+			return "", localizedMessageError("knowledge.empty_file", map[string]any{"Name": fmt.Sprintf("%q", entry.Name())}, fmt.Sprintf("knowledge file %q is empty", entry.Name()), nil)
 		}
 		separator := ""
 		if result.Len() != 0 {
 			separator = "\n\n---\n\n"
 		}
 		if result.Len()+len(separator)+len(text) > maxInterviewContextBytes {
-			return "", fmt.Errorf("面试知识文件总内容不能超过 %d KB", maxInterviewContextBytes/1024)
+			return "", localizedMessageError("knowledge.too_large", map[string]any{"Limit": maxInterviewContextBytes / 1024}, fmt.Sprintf("knowledge content exceeds %d KB", maxInterviewContextBytes/1024), nil)
 		}
 		result.WriteString(separator)
 		result.WriteString(text)
 	}
 	if count == 0 {
-		return "", fmt.Errorf("知识文件夹中没有 Markdown 或文本文件")
+		return "", localizedMessageError("knowledge.no_files", nil, "knowledge folder has no Markdown or text files", nil)
 	}
 	return result.String(), nil
 }
