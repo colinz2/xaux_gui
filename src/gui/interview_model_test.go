@@ -590,6 +590,10 @@ func TestChatCompletionModelReturnsHTTPError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "请求大模型失败") {
 		t.Fatalf("streamAnswer() error = %v", err)
 	}
+	if diagnostic := diagnosticError(err); !strings.Contains(diagnostic, "model request failed") ||
+		!strings.Contains(diagnostic, "invalid key") || strings.Contains(diagnostic, "请求大模型失败") {
+		t.Fatalf("unexpected model error diagnostic: %s", diagnostic)
+	}
 	if errors.Is(err, context.Canceled) {
 		t.Fatalf("unexpected context cancellation: %v", err)
 	}

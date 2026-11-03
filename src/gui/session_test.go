@@ -1,8 +1,10 @@
 package gui
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -410,6 +412,13 @@ func TestTranscriptionSummaryInitializesConfigDirectory(t *testing.T) {
 		t.Fatalf("summary preflight did not load configuration: dir=%q status=%q",
 			setting.modelConfigDir, win.reviewStatus.Text)
 	}
+	logData, err := os.ReadFile(filepath.Join(setting.modelConfigDir, interviewDebugLogFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "stage=validate_model_config error=API key is required") {
+		t.Fatalf("summary preflight did not log the English diagnostic: %s", logData)
+	}
 }
 
 func TestSessionHistorySearchesNameAndTranscript(t *testing.T) {
@@ -465,6 +474,39 @@ func TestSessionHistorySearchesNameAndTranscript(t *testing.T) {
 	win.searchEntry.OnChanged("")
 	if len(win.sessions) != len(sessions) {
 		t.Fatalf("clearing search returned %d sessions, want %d", len(win.sessions), len(sessions))
+	}
+}
+
+func TestSessionHistorySearchLogsReadFailureInEnglish(t *testing.T) {
+	app := fynetest.NewApp()
+	defer app.Quit()
+	root := t.TempDir()
+	session, err := CreateSession(root, "history", SessionKindTranscription)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Finish(SessionStatusStopped, []SessionTranscriptEntry{{Content: "content"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(session.Directory(), session.Snapshot().TranscriptFile)); err != nil {
+		t.Fatal(err)
+	}
+
+	win := &sessionHistoryWin{setting: &appSetting{Setting: Setting{sessionRootDir: root}}}
+	win.window = app.NewWindow("test")
+	defer win.window.Close()
+	win.buildContent()
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	win.searchEntry.SetText("missing")
+
+	if !strings.Contains(output.String(), `read transcript for session "history":`) {
+		t.Fatalf("missing English transcript error in log: %s", output.String())
+	}
+	if !strings.Contains(win.hint.Text, "读取会话") || !strings.Contains(win.hint.Text, "转写文件读取失败") {
+		t.Fatalf("Chinese user-facing error was not preserved: %s", win.hint.Text)
 	}
 }
 

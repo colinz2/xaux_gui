@@ -20,10 +20,11 @@ type interviewContext struct {
 func validateInterviewContext(text, label string) (string, error) {
 	text = strings.TrimSpace(text)
 	if !utf8.ValidString(text) || strings.ContainsRune(text, 0) {
-		return "", fmt.Errorf("%s必须是 UTF-8 文本", label)
+		return "", localizedError(fmt.Sprintf("%s必须是 UTF-8 文本", label), "reference must be valid UTF-8 text", nil)
 	}
 	if len(text) > maxInterviewContextBytes {
-		return "", fmt.Errorf("%s不能超过 %d KB", label, maxInterviewContextBytes/1024)
+		return "", localizedError(fmt.Sprintf("%s不能超过 %d KB", label, maxInterviewContextBytes/1024),
+			fmt.Sprintf("reference exceeds %d KB", maxInterviewContextBytes/1024), nil)
 	}
 	return text, nil
 }
@@ -51,12 +52,12 @@ func loadInterviewResume(enabled bool, path string) (string, error) {
 func readInterviewReference(path, label string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("打开%s失败：%w", label, err)
+		return "", localizedError(fmt.Sprintf("打开%s失败", label), "open reference failed", err)
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, maxInterviewContextBytes+1))
 	if err != nil {
-		return "", fmt.Errorf("读取%s失败：%w", label, err)
+		return "", localizedError(fmt.Sprintf("读取%s失败", label), "read reference failed", err)
 	}
 	return validateInterviewContext(string(data), label)
 }

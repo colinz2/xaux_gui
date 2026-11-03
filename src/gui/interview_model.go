@@ -78,7 +78,7 @@ func classifyInterviewTurn(ctx context.Context, model interviewAnswerModel, mess
 		return interviewQuestionUncertain, err
 	}
 	if tooLong {
-		return interviewQuestionUncertain, errors.New("问题判断结果格式无效")
+		return interviewQuestionUncertain, localizedError("问题判断结果格式无效", "invalid question classification response", nil)
 	}
 	switch strings.TrimSpace(result.String()) {
 	case "QUESTION":
@@ -88,7 +88,7 @@ func classifyInterviewTurn(ctx context.Context, model interviewAnswerModel, mess
 	case "UNCERTAIN":
 		return interviewQuestionUncertain, nil
 	default:
-		return interviewQuestionUncertain, errors.New("问题判断结果格式无效")
+		return interviewQuestionUncertain, localizedError("问题判断结果格式无效", "invalid question classification response", nil)
 	}
 }
 
@@ -153,10 +153,10 @@ func newChatCompletionModel(config modelConfig) (*chatCompletionModel, error) {
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			if request.URL.Scheme == "http" &&
 				!isLoopbackHost(request.URL.Hostname()) {
-				return errors.New("拒绝跳转到不安全的远程 HTTP 模型地址")
+				return localizedError("拒绝跳转到不安全的远程 HTTP 模型地址", "refusing redirect to an insecure remote HTTP model endpoint", nil)
 			}
 			if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && request.URL.Scheme == "http" {
-				return errors.New("拒绝模型请求从 HTTPS 降级到 HTTP")
+				return localizedError("拒绝模型请求从 HTTPS 降级到 HTTP", "refusing model request redirect from HTTPS to HTTP", nil)
 			}
 			if len(via) >= 10 {
 				return http.ErrUseLastResponse
@@ -196,19 +196,19 @@ func (t *thinkingModeTransport) RoundTrip(request *http.Request) (*http.Response
 	body, err := io.ReadAll(request.Body)
 	closeErr := request.Body.Close()
 	if err != nil {
-		return nil, fmt.Errorf("读取模型请求失败：%w", err)
+		return nil, localizedError("读取模型请求失败", "read model request failed", err)
 	}
 	if closeErr != nil {
-		return nil, fmt.Errorf("关闭模型请求失败：%w", closeErr)
+		return nil, localizedError("关闭模型请求失败", "close model request failed", closeErr)
 	}
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("解析模型请求失败：%w", err)
+		return nil, localizedError("解析模型请求失败", "decode model request failed", err)
 	}
 	payload["thinking"] = json.RawMessage(`{"type":"disabled"}`)
 	body, err = json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("编码模型请求失败：%w", err)
+		return nil, localizedError("编码模型请求失败", "encode model request failed", err)
 	}
 	updated := request.Clone(request.Context())
 	updated.Body = io.NopCloser(bytes.NewReader(body))
@@ -252,8 +252,8 @@ func (m *chatCompletionModel) streamAnswer(
 		ReasoningEffort: reasoningEffort,
 	})
 	if err != nil {
-		m.debugf("request failed after=%s error=%v", time.Since(startedAt).Round(time.Millisecond), err)
-		return fmt.Errorf("请求大模型失败：%w", err)
+		m.debugf("request failed after=%s error=%s", time.Since(startedAt).Round(time.Millisecond), diagnosticError(err))
+		return localizedError("请求大模型失败", "model request failed", err)
 	}
 	defer stream.Close()
 	m.debugf("stream connected after=%s", time.Since(startedAt).Round(time.Millisecond))
@@ -269,9 +269,9 @@ func (m *chatCompletionModel) streamAnswer(
 		if err != nil {
 			m.debugf(
 				"stream failed after=%s answer_chars=%d reasoning_chars=%d error=%v",
-				time.Since(startedAt).Round(time.Millisecond), answerBytes, reasoningBytes, err,
+				time.Since(startedAt).Round(time.Millisecond), answerBytes, reasoningBytes, diagnosticError(err),
 			)
-			return fmt.Errorf("接收大模型回答失败：%w", err)
+			return localizedError("接收大模型回答失败", "receive model response failed", err)
 		}
 		if len(response.Choices) == 0 {
 			continue
@@ -307,9 +307,12 @@ func (m *chatCompletionModel) streamAnswer(
 			time.Since(startedAt).Round(time.Millisecond), reasoningBytes,
 		)
 		if reasoningBytes > 0 {
-			return fmt.Errorf("模型仅返回了思考过程，没有生成可显示的回答（思考内容 %d 字符）", reasoningBytes)
+			return localizedError(
+				fmt.Sprintf("模型仅返回了思考过程，没有生成可显示的回答（思考内容 %d 字符）", reasoningBytes),
+				fmt.Sprintf("model returned only reasoning with no displayable answer (%d characters)", reasoningBytes), nil,
+			)
 		}
-		return errors.New("模型返回了空回答")
+		return localizedError("模型返回了空回答", "model returned an empty answer", nil)
 	}
 	m.debugf(
 		"stream completed total=%s first_answer=%s answer_chars=%d reasoning_chars=%d",
@@ -336,33 +339,33 @@ func maxTokensForModel(model string) int {
 
 func openInterviewDebugLogger(configDir string) (*log.Logger, *os.File, error) {
 	if strings.TrimSpace(configDir) == "" {
-		return nil, nil, errors.New("面试调试日志目录为空")
+		return nil, nil, localizedError("面试调试日志目录为空", "interview debug log directory is empty", nil)
 	}
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return nil, nil, fmt.Errorf("创建面试调试日志目录失败：%w", err)
+		return nil, nil, localizedError("创建面试调试日志目录失败", "create interview debug log directory failed", err)
 	}
 	path := filepath.Join(configDir, interviewDebugLogFileName)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return nil, nil, fmt.Errorf("打开面试调试日志失败：%w", err)
+		return nil, nil, localizedError("打开面试调试日志失败", "open interview debug log failed", err)
 	}
 	return log.New(file, "", log.LstdFlags|log.Lmicroseconds), file, nil
 }
 
 func resetInterviewDebugLog(configDir string) error {
 	if strings.TrimSpace(configDir) == "" {
-		return errors.New("面试调试日志目录为空")
+		return localizedError("面试调试日志目录为空", "interview debug log directory is empty", nil)
 	}
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return fmt.Errorf("创建面试调试日志目录失败：%w", err)
+		return localizedError("创建面试调试日志目录失败", "create interview debug log directory failed", err)
 	}
 	path := filepath.Join(configDir, interviewDebugLogFileName)
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
-		return fmt.Errorf("清空上次面试调试日志失败：%w", err)
+		return localizedError("清空上次面试调试日志失败", "reset interview debug log failed", err)
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("关闭面试调试日志失败：%w", err)
+		return localizedError("关闭面试调试日志失败", "close interview debug log failed", err)
 	}
 	return nil
 }

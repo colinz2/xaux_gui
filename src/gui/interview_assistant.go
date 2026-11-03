@@ -274,7 +274,11 @@ func startInterviewAssistant(requestedName, jobDescription string) error {
 			}
 		}(capture)
 		if err := <-capture.soundCap.StartDone(); err != nil {
-			go assistant.failStartup(fmt.Errorf("启动音源 %q 失败：%w", capture.deviceName, err))
+			go assistant.failStartup(localizedError(
+				fmt.Sprintf("启动音源 %q 失败", capture.deviceName),
+				fmt.Sprintf("start audio source %q failed", capture.deviceName),
+				err,
+			))
 			return nil
 		}
 	}
@@ -543,9 +547,12 @@ func (s *interviewAssistant) startQuestionCheckWorker() {
 					return
 				}
 				if errors.Is(err, context.DeadlineExceeded) {
-					err = fmt.Errorf("等待问题判断超过 %s", interviewQuestionTimeout)
+					err = localizedError(
+						fmt.Sprintf("等待问题判断超过 %s", interviewQuestionTimeout),
+						fmt.Sprintf("question classification timed out after %s", interviewQuestionTimeout), nil,
+					)
 				}
-				s.debugf("question check completed decision=%d error=%v", decision, err)
+				s.debugf("question check completed decision=%d error=%s", decision, diagnosticError(err))
 				fyne.DoAndWait(func() {
 					if !s.stopping.Load() {
 						s.applyQuestionDecision(check.turnIndex, decision, err)
@@ -748,11 +755,14 @@ func (s *interviewAssistant) startAnswerWorker() {
 				cancel()
 				s.finishAnswer(question.answer)
 				if errors.Is(err, context.DeadlineExceeded) {
-					err = fmt.Errorf("等待大模型响应超过 %s", interviewAnswerTimeout)
+					err = localizedError(
+						fmt.Sprintf("等待大模型响应超过 %s", interviewAnswerTimeout),
+						fmt.Sprintf("model response timed out after %s", interviewAnswerTimeout), nil,
+					)
 				}
 				s.debugf(
 					"answer worker finished id=%d duration=%s answer_chars=%d error=%v",
-					question.answer.sequence, time.Since(startedAt).Round(time.Millisecond), answerChars, err,
+					question.answer.sequence, time.Since(startedAt).Round(time.Millisecond), answerChars, diagnosticError(err),
 				)
 				fyne.DoAndWait(func() {
 					if s.stopping.Load() {
@@ -966,7 +976,7 @@ func (s *interviewAssistant) shutdown() {
 }
 
 func (s *interviewAssistant) failStartup(err error) {
-	s.debugf("session startup failed error=%v", err)
+	s.debugf("session startup failed error=%s", diagnosticError(err))
 	s.stopping.Store(true)
 	s.cancel()
 	stopASRSoundCaps(s.captures)

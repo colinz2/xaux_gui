@@ -294,7 +294,11 @@ func (w *RecorderWin) start() {
 	w.stopButton.Enable()
 	for _, source := range w.selectedSources() {
 		if err := source.start(paths[source]); err != nil {
-			log.Printf("start %s recording: %v", source.title, err)
+			sourceName := "speaker"
+			if source.isMicrophone {
+				sourceName = "microphone"
+			}
+			log.Printf("start %s recording: %v", sourceName, err)
 		}
 	}
 	w.finishIfIdle()

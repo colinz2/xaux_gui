@@ -281,7 +281,7 @@ func (w *sessionHistoryWin) searchSessions() {
 			data, err := os.ReadFile(path)
 			if err != nil {
 				readErr := fmt.Errorf("读取会话 %q 的转写失败：%w", info.Name, err)
-				log.Print(readErr)
+				log.Printf("read transcript for session %q: %v", info.Name, err)
 				failedReads++
 				if firstReadErr == nil {
 					firstReadErr = readErr
@@ -522,7 +522,7 @@ func (w *sessionHistoryWin) logInterviewReviewActionState(info SessionInfo, enab
 	}
 	logger, file, err := openInterviewDebugLogger(w.setting.modelConfigDir)
 	if err != nil {
-		log.Printf("log interview review action state: %v", err)
+		log.Printf("log interview review action state: %s", diagnosticError(err))
 		return
 	}
 	logger.Printf(
@@ -584,7 +584,7 @@ func (w *sessionHistoryWin) generateSessionAnalysis() {
 		filepath.Base(info.Directory), info.Status, filepath.Base(info.TranscriptFile),
 	)
 	failPreflight := func(stage string, err error) {
-		logger.Printf("review preflight failed stage=%s error=%v", stage, err)
+		logger.Printf("review preflight failed stage=%s error=%s", stage, diagnosticError(err))
 		w.setReviewStatus(label + "准备失败：" + err.Error())
 	}
 	transcriptPath := filepath.Join(info.Directory, filepath.Base(info.TranscriptFile))
@@ -594,7 +594,7 @@ func (w *sessionHistoryWin) generateSessionAnalysis() {
 		return
 	}
 	if strings.TrimSpace(string(transcript)) == "" {
-		failPreflight("empty_transcript", errors.New("转写记录为空"))
+		failPreflight("empty_transcript", localizedError("转写记录为空", "transcript is empty", nil))
 		return
 	}
 	transcriptChars := len([]rune(string(transcript)))
@@ -658,7 +658,7 @@ func (w *sessionHistoryWin) generateSessionAnalysis() {
 		content := strings.TrimSpace(review.String())
 		logger.Printf(
 			"review finished duration=%s answer_chars=%d error=%v",
-			time.Since(startedAt).Round(time.Millisecond), len([]rune(content)), err,
+			time.Since(startedAt).Round(time.Millisecond), len([]rune(content)), diagnosticError(err),
 		)
 		cancel()
 		closeInterviewDebugLog(logger, logFile)

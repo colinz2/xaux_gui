@@ -30,7 +30,7 @@ func NewMainWin() *MainWin {
 	mw := &MainWin{}
 	mw.app = app.NewWithID(appID)
 	if err := resetInterviewDebugLog(mw.app.Storage().RootURI().Path()); err != nil {
-		log.Printf("reset interview debug log at startup: %v", err)
+		log.Printf("reset interview debug log at startup: %s", diagnosticError(err))
 	}
 	mw.app.SetIcon(mytheme.ResAppIcon)
 	mw.app.Settings().SetTheme(mytheme.MyTheme{})
