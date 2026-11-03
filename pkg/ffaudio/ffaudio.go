@@ -114,7 +114,7 @@ func UnInit() {
 
 // findDevID selects a device and copies its mix format into cConf. The device
 // iterator must remain alive until audio_open has consumed the device ID.
-func findDevID(dev *C.ffaudio_dev, deviceName string, cConf *C.ffaudio_conf) (bool, error) {
+func findDevID(dev *C.ffaudio_dev, deviceName string, mode int32, cConf *C.ffaudio_conf) (bool, error) {
 	if dev == nil {
 		return false, ErrFFAudioDev
 	}
@@ -132,7 +132,14 @@ func findDevID(dev *C.ffaudio_dev, deviceName string, cConf *C.ffaudio_conf) (bo
 			continue
 		}
 
-		cConf.device_id = (*C.char)(C.audio_dev_info_DEV_ID(dev))
+		deviceID := C.audio_dev_info_DEV_ID(dev)
+		if mode == ModeLoopBack {
+			deviceID = C.audio_dev_info_LOOPBACK_ID(dev)
+		}
+		if deviceID == nil {
+			return false, fmt.Errorf("%w: device %q has no capture source", ErrFFAudioDev, deviceName)
+		}
+		cConf.device_id = (*C.char)(deviceID)
 		if format := C.audio_dev_info_MIX_FORMAT_0(dev); format > 0 {
 			cConf.format = format
 		}
@@ -166,7 +173,7 @@ func (f *FFAudio) allocCAudioConf(conf *Config, mode int32) (*C.ffaudio_conf, er
 			C.ffaudio_conf_free(cConf)
 			return nil, ErrFFAudioDev
 		}
-		found, err := findDevID(f.dev, conf.DeviceName, cConf)
+		found, err := findDevID(f.dev, conf.DeviceName, mode, cConf)
 		if err != nil {
 			f.releaseCAudioConf(cConf)
 			return nil, err

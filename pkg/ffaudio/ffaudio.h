@@ -20,6 +20,7 @@ int audio_dev_next(ffaudio_dev *d);
 const char* audio_dev_info(ffaudio_dev *d, ffuint i);
 
 void* audio_dev_info_DEV_ID(ffaudio_dev *d);
+void* audio_dev_info_LOOPBACK_ID(ffaudio_dev *d);
 //format
 ffuint audio_dev_info_MIX_FORMAT_0(ffaudio_dev *d);
 //SampleRate
