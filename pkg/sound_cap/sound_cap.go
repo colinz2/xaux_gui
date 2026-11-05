@@ -75,6 +75,7 @@ type SoundCap struct {
 	cancel context.CancelFunc
 
 	asrClient               *x.Client
+	asrCallback             x.AsrResultCallBack
 	converter               *ffaudio.PCMConverter
 	recording               *wavWriter
 	recordingSegmentPending bool
@@ -126,6 +127,7 @@ func NewSoundCap(ctx context.Context, config *Config, asrCb x.AsrResultCallBack)
 
 	if sc.ProxyAddr != "" {
 		var err error
+		sc.asrCallback = asrCb
 		if sc.asrClient, err = x.NewClient(sc.ProxyAddr, asrCb); err != nil {
 			sc.cancel()
 			return nil, fmt.Errorf("%w: connect ASR proxy: %w", ErrASRProxyUnavailable, err)
@@ -405,13 +407,7 @@ func (s *SoundCap) Resume() error {
 	}
 
 	s.ioMu.Lock()
-	var err error
-	if s.asrClient != nil {
-		err = s.asrClient.Start(x.StartConfig{
-			SampleRate:    int32(s.SampleRate),
-			BitsPerSample: int32(s.BitsPerSample),
-		})
-	}
+	err := s.restartASRClientLocked()
 	s.ioMu.Unlock()
 	if err != nil {
 		if s.isClose() {
@@ -437,6 +433,32 @@ func (s *SoundCap) Resume() error {
 	if s.isClose() || !s.transitionState(StateResuming, StateRunning) {
 		return fmt.Errorf("%w: Resume after Close", ErrInvalidState)
 	}
+	return nil
+}
+
+// restartASRClientLocked replaces the ended ASR session with a fresh proxy
+// connection. The proxy binds one upstream ASR session per connection and a
+// finished session cannot be restarted (the doubao backend rejects it with
+// "session already started"), so resuming must reconnect instead of calling
+// Start again on the old connection.
+func (s *SoundCap) restartASRClientLocked() error {
+	if s.asrClient == nil {
+		return nil
+	}
+	s.asrClient.Close()
+	s.asrClient = nil
+	client, err := x.NewClient(s.ProxyAddr, s.asrCallback)
+	if err != nil {
+		return fmt.Errorf("%w: reconnect ASR proxy: %w", ErrASRProxyUnavailable, err)
+	}
+	if err := client.Start(x.StartConfig{
+		SampleRate:    int32(s.SampleRate),
+		BitsPerSample: int32(s.BitsPerSample),
+	}); err != nil {
+		client.Close()
+		return fmt.Errorf("%w: restart ASR session: %w", ErrASRProxyUnavailable, err)
+	}
+	s.asrClient = client
 	return nil
 }
 
