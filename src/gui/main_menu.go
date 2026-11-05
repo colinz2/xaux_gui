@@ -9,6 +9,7 @@ const (
 	realTimeTransMenuName  = "转写"
 	interviewAssistantName = "面试"
 	recordMenuName         = "录音"
+	subtitleMenuName       = "字幕"
 	sessionHistoryMenuName = "历史"
 	sessionHistoryItemName = "会话历史"
 	aboutMenuName          = "关于"
@@ -32,6 +33,7 @@ func newMainMenu() *fyne.MainMenu {
 
 	realTimeTransItem := fyne.NewMenuItem(tr("menu.transcription"), runRealTimeTrans)
 	interviewAssistantItem := fyne.NewMenuItem(tr("menu.interview"), runInterviewAssistant)
+	subtitleItem := fyne.NewMenuItem(tr("menu.subtitle"), runSubtitle)
 	recordItem := fyne.NewMenuItem(tr("menu.record"), runRecorder)
 	sessionHistoryItem := fyne.NewMenuItem(tr("menu.session_history"), runSessionHistory)
 	versionItem := fyne.NewMenuItem(tr("menu.version"), showVersionInformation)
@@ -39,7 +41,7 @@ func newMainMenu() *fyne.MainMenu {
 
 	return fyne.NewMainMenu(
 		fyne.NewMenu(tr("menu.start"), settingsItem, exitItem),
-		fyne.NewMenu(tr("menu.speech"), recordItem, realTimeTransItem, interviewAssistantItem),
+		fyne.NewMenu(tr("menu.speech"), recordItem, realTimeTransItem, interviewAssistantItem, subtitleItem),
 		fyne.NewMenu(tr("menu.history"), sessionHistoryItem),
 		fyne.NewMenu(tr("menu.about"), versionItem, githubItem),
 	)

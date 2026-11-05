@@ -79,12 +79,16 @@ func (m *MainWin) quitHandle() {
 	}
 	transcriptionDone := stopActiveTranscription()
 	interviewDone := stopActiveInterview()
+	subtitleDone := stopActiveSubtitle()
 	go func() {
 		if transcriptionDone != nil {
 			<-transcriptionDone
 		}
 		if interviewDone != nil {
 			<-interviewDone
+		}
+		if subtitleDone != nil {
+			<-subtitleDone
 		}
 		stopActiveRecorder()
 		ffaudio.UnInit()

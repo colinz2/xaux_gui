@@ -408,8 +408,8 @@ func TestSessionHistoryChangesAnalysisByTaskType(t *testing.T) {
 		t.Fatalf("summary manifest not persisted: sessions=%+v err=%v", sessions, err)
 	}
 	win.showSession(sessions[0])
-	if !strings.Contains(win.metadata.Text, "任务类型：转写") ||
-		!win.historyTabs.Visible() || win.transcriptTab.Text != "转写" ||
+	if !strings.Contains(win.metadata.Text, "任务类型：会议") ||
+		!win.historyTabs.Visible() || win.transcriptTab.Text != "会议" ||
 		win.reviewTab.Text != "AI 总结" || win.reviewHeader.Text != "AI 总结" ||
 		win.reviewButton.Text != "重新生成总结" || win.review.Text != "项目进展顺利\n" ||
 		!win.review.Selectable {

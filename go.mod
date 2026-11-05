@@ -6,10 +6,11 @@ require (
 	fyne.io/fyne/v2 v2.8.2
 	github.com/gen2brain/malgo v0.11.27
 	github.com/nicksnyder/go-i18n/v2 v2.7.0
-	github.com/realzhangm/xaux v0.0.0-20261102134721-d19956fae13d
+	github.com/realzhangm/xaux v0.0.0-20261105094642-c50c5113b773
 	github.com/sashabaranov/go-openai v1.43.0
 	github.com/sqweek/dialog v0.0.0-20260123140253-64c163d53aac
 	golang.org/x/sys v0.49.0
+	golang.org/x/text v0.43.0
 )
 
 require (
@@ -44,5 +45,4 @@ require (
 	golang.org/x/image v0.47.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
 )

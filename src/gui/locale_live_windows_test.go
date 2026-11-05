@@ -40,7 +40,7 @@ func TestTranscriptionWindowLanguageSwitchPreservesTranscript(t *testing.T) {
 	if err := uiLocale.setLanguage(localeEnglish); err != nil {
 		t.Fatal(err)
 	}
-	if window.window.Title() != "Transcription" || window.status.Text != "Listening" ||
+	if window.window.Title() != "Meeting" || window.status.Text != "Listening" ||
 		window.rows[0].status.Text != "Recognizing" || window.rows[0].content.Text != "识别内容" ||
 		window.followLatest {
 		t.Fatal("switching language changed the running transcription or its contents")

@@ -53,6 +53,8 @@ github.com/nicksnyder/go-i18n/v2 v2.7.0 h1:oiVQUmuCeNggvm/fUVb6/R0aP82BDVphZnmVH
 github.com/nicksnyder/go-i18n/v2 v2.7.0/go.mod h1:ZMYiWg8ndQSGNk4zbzbyJjrrVjQjuQ8pERFrnBik+c8=
 github.com/realzhangm/xaux v0.0.0-20261102134721-d19956fae13d h1:+N901o586WB7rZulnVHZEkJreqLmGSKk1MdmDy/DqBg=
 github.com/realzhangm/xaux v0.0.0-20261102134721-d19956fae13d/go.mod h1:4hy8JJksiC9dxK3i3SzK/nI1ZPUm7o+pjba8Ag5orMA=
+github.com/realzhangm/xaux v0.0.0-20261105094642-c50c5113b773 h1:EjNW3moOD6TeCmTfHk4/o6o1tYtf3odvoLnrfYFIIzw=
+github.com/realzhangm/xaux v0.0.0-20261105094642-c50c5113b773/go.mod h1:4hy8JJksiC9dxK3i3SzK/nI1ZPUm7o+pjba8Ag5orMA=
 github.com/rymdport/portal v0.4.2 h1:7jKRSemwlTyVHHrTGgQg7gmNPJs88xkbKcIL3NlcmSU=
 github.com/rymdport/portal v0.4.2/go.mod h1:kFF4jslnJ8pD5uCi17brj/ODlfIidOxlgUDTO5ncnC4=
 github.com/sashabaranov/go-openai v1.43.0 h1:HNRpO8TAQ01ssO7aPXO/68QRlcCCYQQ5GfHbFceRZcY=
