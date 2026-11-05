@@ -73,6 +73,45 @@ func TestNewSoundCapRecordingOnly(t *testing.T) {
 	}
 }
 
+func TestLocalPCMObserverWithoutASROrRecording(t *testing.T) {
+	wantError := errors.New("detector failed")
+	var observed []byte
+	var observerError error
+	capture, err := NewSoundCap(t.Context(), &Config{
+		Mode: CaptureMicrophone,
+		OnPCM: func(pcm []byte) error {
+			observed = append(observed, pcm...)
+			return observerError
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capture.Close()
+	format := ffaudio.PCMFormat{SampleRate: 16000, Channels: 1, Format: ffaudio.FormatInt16}
+	capture.converter, err = ffaudio.NewPCMConverter(format, format)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capture.setState(StateRunning)
+	audio := []byte{1, 0, 0xff, 0xff}
+	if n, err := capture.Write(audio); err != nil || n != len(audio) {
+		t.Fatalf("local capture Write() = %d, %v", n, err)
+	}
+	if !bytes.Equal(observed, audio) || capture.asrClient != nil || capture.vadASR != nil || capture.recording != nil {
+		t.Fatal("local PCM observer must receive audio without ASR or a recording")
+	}
+	observerError = wantError
+	if _, err := capture.Write(audio); !errors.Is(err, wantError) {
+		t.Fatalf("detector error not propagated: %v", err)
+	}
+	capture.setState(StatePaused)
+	observed = nil
+	if _, err := capture.Write(audio); err != nil || len(observed) != 0 {
+		t.Fatal("paused capture invoked the PCM observer")
+	}
+}
+
 func TestPauseRequiresRunningCapture(t *testing.T) {
 	capture, err := NewSoundCap(context.Background(), &Config{Mode: CaptureMicrophone}, nil)
 	if err != nil {

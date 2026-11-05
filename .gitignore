@@ -15,3 +15,7 @@
 # vendor/
 local/
 agent_task/
+
+# TEN VAD deployment notices copied by build.ps1
+/TEN-VAD-LICENSE
+/TEN-VAD-NOTICES

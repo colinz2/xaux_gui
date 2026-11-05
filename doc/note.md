@@ -11,7 +11,7 @@ fyne package -os windows -icon ./asset/icon.png --name xaux_gui
 ```shell
 # From the repository root (PowerShell):
 .\build.ps1
-# Equivalent command:
+# Build without the optional TEN VAD integration:
 go build -ldflags "-H=windowsgui" -o main.exe .\src
 ```
 

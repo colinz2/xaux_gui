@@ -17,7 +17,7 @@ func TestMainMenuUsesSimpleTopLevelNavigation(t *testing.T) {
 	wantLabels := []string{"开始", "语音", "历史", "关于"}
 	wantItems := [][]string{
 		{"设置", "退出"},
-		{"录音", "会议", "面试", "字幕"},
+		{"录音", "会议", "面试", "字幕", "VAD"},
 		{sessionHistoryItemName},
 		{versionMenuItemName, "github"},
 	}
@@ -64,13 +64,13 @@ func TestMainMenuLanguageSwitchKeepsSingleQuitAction(t *testing.T) {
 		items    [][]string
 	}{
 		{localeEnglish, []string{"Start", "Voice", "History", "About"}, [][]string{
-			{"Settings", "Exit"}, {"Record", "Meeting", "Interview", "Subtitles"}, {"Session history"}, {"Version", "github"},
+			{"Settings", "Exit"}, {"Record", "Meeting", "Interview", "Subtitles", "VAD"}, {"Session history"}, {"Version", "github"},
 		}},
 		{localeChinese, []string{"开始", "语音", "历史", "关于"}, [][]string{
-			{"设置", "退出"}, {"录音", "会议", "面试", "字幕"}, {"会话历史"}, {"版本显示", "github"},
+			{"设置", "退出"}, {"录音", "会议", "面试", "字幕", "VAD"}, {"会话历史"}, {"版本显示", "github"},
 		}},
 		{localeEnglish, []string{"Start", "Voice", "History", "About"}, [][]string{
-			{"Settings", "Exit"}, {"Record", "Meeting", "Interview", "Subtitles"}, {"Session history"}, {"Version", "github"},
+			{"Settings", "Exit"}, {"Record", "Meeting", "Interview", "Subtitles", "VAD"}, {"Session history"}, {"Version", "github"},
 		}},
 	}
 	for _, tc := range cases {

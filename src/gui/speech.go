@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"xaux_gui/pkg/sound_cap"
+	"xaux_gui/pkg/vad"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -122,6 +123,7 @@ func newASRSoundCap(
 	}
 	capture, err := sound_cap.NewSoundCap(ctx, &sound_cap.Config{
 		ProxyAddr:          proxyAddr,
+		UseVAD:             vad.Enabled,
 		DeviceName:         deviceName,
 		Mode:               mode,
 		RecordFilePath:     savePath,

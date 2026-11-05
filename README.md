@@ -10,6 +10,28 @@ go run src/main.go
 
 在仓库根目录的 PowerShell 中运行 `.\build.ps1`，生成 `main.exe`。双击该文件启动时不会弹出命令行窗口；字体已嵌入程序，无需额外复制字体文件，也不依赖启动目录。`go run` 仍用于终端开发调试。
 
+### TEN VAD（Windows 试验集成）
+
+`build.ps1` 使用 `tenvad` 构建标签，默认在会议、面试和字幕的每路 ASR 采集前启用本地 TEN VAD。Windows amd64/x86 需要 cgo、可用的 C 编译器和对应架构的 TEN VAD DLL；DLL 可能还需要 Microsoft Visual C++ 运行库。
+
+首次构建前，从仓库根目录准备上游依赖（已有该目录时不要重复克隆；该外部源码目录不纳入本项目 Git 管理）：
+
+```powershell
+git clone https://github.com/TEN-framework/ten-vad.git .\pkg\vad\ten-vad
+git -C .\pkg\vad\ten-vad checkout 8843b97555afa4359d319831b6c3a52e6377b0fc
+.\build.ps1
+```
+
+发布时将 `main.exe`、`ten_vad.dll`、`TEN-VAD-LICENSE`、`TEN-VAD-NOTICES` 放在同一目录。脚本会复制 DLL 和许可证；不能只分发 EXE。TEN VAD 使用 Apache 2.0 附加条件许可证，包含竞争性用途限制，发布或商用前请核对上游 LICENSE/NOTICES，不能视为标准 Apache 2.0。
+
+启用后，16 kHz 单声道 int16 音频以 256 样本（16 ms）帧检测，阈值为 0.5。连续检测到约 96 ms 人声才连接 ASR，并补发最多 400 ms 缓存音频（包含起音确认段）；短停顿继续发送，连续静音 2 秒后等待最终识别并关闭连接，再次开口建立新连接。原始 WAV 包括静音，保持完整；纯录音功能不启用 VAD。两路采集分别维护检测器和 ASR 会话，新连接的句子索引会映射为不重复的本地索引。
+
+连接和结束 ASR 在独立工作协程中执行；连接期间音频进入有界队列（最多 10 秒且最多 128 个采集块，先达到的限制生效），队列溢出或 VAD/网络失败会明确报错，不会静默丢音频或自动退回持续调用云端。暂停时发送当前识别中不足一帧的尾音、完成识别并清空起音缓存，恢复后重新等待人声。代理不可用的错误可能在人声出现后才提示。日志中的 `VAD ASR opened` / `VAD ASR closed` 可用于观察开关次数；实际节省费用取决于云服务的计费粒度，阈值仍需实际设备验证。
+
+开发时运行 `go run -tags tenvad .\src`，测试可运行 `go test -tags tenvad ./pkg/vad ./pkg/sound_cap ./src/gui`。不带标签的普通 `go run` / `go build` 保持原来的持续 ASR 行为；目前不提供非 Windows 平台的 TEN VAD 原生适配。
+
+通过 **语音 > VAD** 打开麦克风实验室，点击“开始测试”使用首页选定的麦克风（未指定时使用系统默认设备）。界面显示最近 8 秒的波形、人声区间高亮、原始 VAD 高低判定线，以及累计人声时长、占比和输入音量。波形仅显示放大 4 倍，不改变检测输入；检测阈值与实时 ASR 相同，此测试不叠加 ASR 的起音确认和静音断连策略。测试不连接代理或云端，不创建会话、不保存录音。停止后保留图像便于观察，再次开始会清空；关闭窗口或退出应用会释放麦克风。测试期间与其他语音任务互斥。
+
 录音由进程内的 `pkg/ffaudio` 完成，不需要在 `PATH` 中安装或配置外部录音程序。
 
 ### Linux 构建和音频

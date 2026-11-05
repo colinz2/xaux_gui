@@ -46,6 +46,7 @@ type Config struct {
 	DeviceName     string // Empty selects the system default for the chosen mode.
 	Mode           CaptureMode
 	RecordFilePath string
+	UseVAD         bool // Delay cloud ASR until speech; recordings remain complete.
 
 	// Output format used for both ASR and the optional WAV recording. Zero
 	// values select the required 16 kHz/mono/int16 format; other values are
@@ -58,6 +59,9 @@ type Config struct {
 	OnError            func(error)
 	OnStateChange      func(State)
 	OnRecordingSegment func(RecordingSegment)
+	// OnPCM observes converted 16 kHz/mono/int16 audio synchronously.
+	// It must not retain or modify the buffer.
+	OnPCM func([]byte) error
 }
 
 type RecordingSegment struct {
@@ -76,6 +80,7 @@ type SoundCap struct {
 
 	asrClient               *x.Client
 	asrCallback             x.AsrResultCallBack
+	vadASR                  *vadASR
 	converter               *ffaudio.PCMConverter
 	recording               *wavWriter
 	recordingSegmentPending bool
@@ -128,6 +133,14 @@ func NewSoundCap(ctx context.Context, config *Config, asrCb x.AsrResultCallBack)
 	if sc.ProxyAddr != "" {
 		var err error
 		sc.asrCallback = asrCb
+		if sc.UseVAD {
+			sc.vadASR, err = newVADASR(sc.ProxyAddr, asrCb, sc.reportError)
+			if err != nil {
+				sc.cancel()
+				return nil, fmt.Errorf("initialize VAD ASR: %w", err)
+			}
+			return sc, nil
+		}
 		if sc.asrClient, err = x.NewClient(sc.ProxyAddr, asrCb); err != nil {
 			sc.cancel()
 			return nil, fmt.Errorf("%w: connect ASR proxy: %w", ErrASRProxyUnavailable, err)
@@ -223,9 +236,9 @@ func (s *SoundCap) Write(p []byte) (int, error) {
 	if len(converted) == 0 {
 		return len(p), nil
 	}
-	if s.asrClient != nil {
-		if err := s.asrClient.Send(converted); err != nil {
-			return 0, fmt.Errorf("send PCM to ASR: %w", err)
+	if s.OnPCM != nil {
+		if err := s.OnPCM(converted); err != nil {
+			return 0, fmt.Errorf("process captured PCM: %w", err)
 		}
 	}
 	if s.recording != nil {
@@ -244,6 +257,15 @@ func (s *SoundCap) Write(p []byte) (int, error) {
 				startedAt := receivedAt.Add(-time.Duration(int64(frames) * int64(time.Second) / int64(s.SampleRate)))
 				s.OnRecordingSegment(RecordingSegment{Frame: frame, StartedAt: startedAt})
 			}
+		}
+	}
+	if s.vadASR != nil {
+		if err := s.vadASR.write(converted); err != nil {
+			return 0, fmt.Errorf("queue PCM to VAD ASR: %w", err)
+		}
+	} else if s.asrClient != nil {
+		if err := s.asrClient.Send(converted); err != nil {
+			return 0, fmt.Errorf("send PCM to ASR: %w", err)
 		}
 	}
 	return len(p), nil
@@ -376,7 +398,9 @@ func (s *SoundCap) Pause() error {
 	s.ioMu.Lock()
 	var err error
 	s.recordingSegmentPending = true
-	if s.asrClient != nil {
+	if s.vadASR != nil {
+		err = s.vadASR.finish()
+	} else if s.asrClient != nil {
 		err = s.asrClient.End()
 	}
 	s.ioMu.Unlock()
@@ -484,6 +508,12 @@ func (s *SoundCap) close() {
 
 		s.ioMu.Lock()
 		s.closeRecordingLocked()
+		if s.vadASR != nil {
+			if err := s.vadASR.close(); err != nil {
+				s.reportError(err)
+			}
+			s.vadASR = nil
+		}
 		if s.asrClient != nil {
 			_ = s.asrClient.End()
 			s.asrClient.Close()

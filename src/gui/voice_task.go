@@ -57,6 +57,8 @@ func voiceTaskDisplayName(task string) string {
 		return tr("menu.interview")
 	case subtitleMenuName:
 		return tr("menu.subtitle")
+	case vadMenuName:
+		return tr("menu.vad")
 	default:
 		return task
 	}
