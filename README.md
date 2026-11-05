@@ -6,6 +6,10 @@
 go run src/main.go
 ```
 
+### Windows 构建
+
+在仓库根目录的 PowerShell 中运行 `.\build.ps1`，生成 `main.exe`。双击该文件启动时不会弹出命令行窗口；字体已嵌入程序，无需额外复制字体文件，也不依赖启动目录。`go run` 仍用于终端开发调试。
+
 录音由进程内的 `pkg/ffaudio` 完成，不需要在 `PATH` 中安装或配置外部录音程序。
 
 ### Linux 构建和音频

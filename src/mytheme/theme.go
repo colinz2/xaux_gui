@@ -3,11 +3,15 @@ package mytheme
 import (
 	"image/color"
 
+	"xaux_gui/src/font"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/theme"
 )
 
 type MyTheme struct{}
+
+var appFont = fyne.NewStaticResource("apr.ttf", font.Regular)
 
 func (MyTheme) Color(c fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
 	switch c {
@@ -45,7 +49,10 @@ func (MyTheme) Color(c fyne.ThemeColorName, v fyne.ThemeVariant) color.Color {
 }
 
 func (MyTheme) Font(s fyne.TextStyle) fyne.Resource {
-	return theme.LightTheme().Font(s)
+	if s.Symbol || s.Monospace {
+		return theme.DefaultTheme().Font(s)
+	}
+	return appFont
 }
 
 func (MyTheme) Icon(n fyne.ThemeIconName) fyne.Resource {
